@@ -66,7 +66,7 @@ async fn read_command<'a, S>(reader: &'a mut S) -> Result<Command, SMTPServerErr
 where
     S: Stream<Item = Result<BytesMut, SMTPLineError>> + Unpin,
 {
-    let line = reader.next().await.ok_or(SMTPServerError::EOF)?.unwrap();
+    let line = reader.next().await.ok_or(SMTPServerError::EOF)??;
 
     match command::<Intl>(&line) {
         Err(_) => Err(SMTPServerError::SyntaxError(line.freeze())),

@@ -7,7 +7,7 @@ description = "Asynchronous ESMTP service library."
 categories = ["email", "network-programming"]
 
 [dependencies]
-rustyknife = {git="https://github.com/zerospam/rustyknife.git", rev="master"}
+rustyknife = {git="https://github.com/zerospam/rustyknife.git", rev="master", default_features=false, features=["quoted-string-rfc2047"]}
 tokio = "=0.2.0-alpha.2"
 bytes = "0.4.12"
 futures-util-preview = "0.3.0-alpha.18"
