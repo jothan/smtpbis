@@ -1,7 +1,7 @@
 #![feature(async_await, async_closure)]
 #![warn(rust_2018_idioms)]
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures_util::try_stream::*;
 use tokio::codec::FramedRead;
 use tokio::net::TcpListener;
@@ -23,7 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{} connected !", addr);
 
             let (reader, mut writer) = socket.split();
-            let mut reader = FramedRead::new(reader, SMTPLineCodec::default());
+            let mut reader = FramedRead::new(reader, SMTPLineCodec::default())
+                .inspect(|line| println!("input: {:?}", line));
 
             if let Err(e) = writer
                 .write_all(b"220 localhost ESMTP smtpbis 0.1.0\r\n")
@@ -34,47 +35,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             loop {
-                match reader.next().await {
-                    Some(Ok(line)) => {
-                        println!("{}: {:?}", addr, line);
-
-                        let reply = match command::<Intl>(&line) {
-                            Ok((rem, cmd)) => {
-                                assert!(rem.is_empty());
-                                println!("cmd: {:?}", cmd);
-
-                                match cmd {
-                                    Command::DATA => {
-                                        writer.write_all(b"354 ok\r\n").await.unwrap();
-                                        handle_data(&mut reader).await.unwrap();
-                                        "250 ok\r\n"
-                                    }
-                                    _ => "250 ok\r\n",
-                                }
-                            }
-                            Err(e) => {
-                                println!("error: {:?}\r\n", e);
-                                return;
-                            }
-                        };
-
-                        print!("{}", reply);
-                        if let Err(e) = writer.write_all(reply.as_bytes()).await {
-                            println!("failed to write to socket; err = {:?}", e);
-                            return;
-                        }
-                    }
-                    None => {
-                        println!("{} disconnected !", addr);
+                let cmd = match read_command(&mut reader).await {
+                    Err(e) => {
+                        println!("command error: {:?}", e);
                         return;
                     }
-                    Some(Err(e)) => {
-                        println!("failed to read from socket; err = {:?}", e);
-                        return;
-                    }
+                    Ok(cmd) => cmd,
                 };
+
+                println!("command: {:?}", cmd);
             }
         });
+    }
+}
+
+#[derive(Debug)]
+enum SMTPServerError {
+    EOF,
+    FramingError(SMTPLineError),
+    SyntaxError(Bytes),
+}
+
+impl From<SMTPLineError> for SMTPServerError {
+    fn from(source: SMTPLineError) -> Self {
+        SMTPServerError::FramingError(source)
+    }
+}
+
+async fn read_command<'a, S>(reader: &'a mut S) -> Result<Command, SMTPServerError>
+where
+    S: Stream<Item = Result<BytesMut, SMTPLineError>> + Unpin,
+{
+    let line = reader.next().await.ok_or(SMTPServerError::EOF)?.unwrap();
+
+    match command::<Intl>(&line) {
+        Err(_) => Err(SMTPServerError::SyntaxError(line.freeze())),
+        Ok((rem, _)) if !rem.is_empty() => Err(SMTPServerError::SyntaxError(line.freeze())),
+        Ok((_, cmd)) => Ok(cmd),
     }
 }
 

@@ -1,3 +1,6 @@
+use std::error::Error;
+use std::fmt::Display;
+
 use bytes::BytesMut;
 use tokio::codec::Decoder;
 
@@ -70,5 +73,13 @@ impl Decoder for SMTPLineCodec {
 impl From<std::io::Error> for SMTPLineError {
     fn from(err: std::io::Error) -> Self {
         Self::IO(err)
+    }
+}
+
+impl Error for SMTPLineError {}
+
+impl Display for SMTPLineError {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        write!(fmt, "{:?}", self)
     }
 }
