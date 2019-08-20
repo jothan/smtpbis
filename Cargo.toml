@@ -11,3 +11,4 @@ rustyknife = {git="https://github.com/zerospam/rustyknife.git", rev="master", de
 tokio = "=0.2.0-alpha.2"
 bytes = "0.4.12"
 futures-util-preview = "0.3.0-alpha.18"
+tokio-rustls = "0.12.0-alpha.1"
