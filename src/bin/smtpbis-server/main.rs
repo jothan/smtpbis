@@ -1,4 +1,3 @@
-#![feature(async_await, async_closure)]
 #![warn(rust_2018_idioms)]
 
 use std::fmt::Write;

@@ -1,5 +1,3 @@
-#![feature(async_await, async_closure)]
-
 mod codecs;
 mod reply;
 
