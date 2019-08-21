@@ -97,10 +97,18 @@ enum LoopExit {
     STARTTLS,
 }
 
+#[derive(Debug, PartialEq)]
+enum State {
+    Initial,
+    MAIL,
+    RCPT,
+}
+
 async fn smtp_server_loop<S>(base_socket: &mut S, addr: SocketAddr) -> Result<LoopExit, ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS,
 {
+    let mut state = State::Initial;
     let tls_session = base_socket.tls_session().is_some();
     let mut ehlo_keywords = vec!["PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8", "CHUNKING"];
     if !tls_session {
@@ -160,28 +168,78 @@ where
                 for kw in &ehlo_keywords {
                     writeln!(reply_text, "{}", kw).unwrap();
                 }
+                state = State::Initial;
                 socket.send(Reply::new(250, None, reply_text)).await?;
             }
-            Command::DATA => {
-                socket.send(Reply::new(354, None, "send data")).await?;
-
-                let body = handle_data(&mut socket).await?;
-                socket
-                    .send(Reply::new(
-                        250,
-                        None,
-                        format!("{} bytes received, body ok", body.len()),
-                    ))
-                    .await?;
+            Command::HELO(_) => {
+                state = State::Initial;
+                socket.send(Reply::new(250, None, "ok")).await?;
             }
+            Command::MAIL(_path, _) => match state {
+                State::Initial => {
+                    state = State::MAIL;
+                    socket.send(Reply::new(250, None, "ok")).await?;
+                }
+                _ => {
+                    socket
+                        .send(Reply::new(503, None, "bad sequence of commands"))
+                        .await?;
+                }
+            },
+            Command::RCPT(_path, _) => match state {
+                State::MAIL | State::RCPT => {
+                    state = State::RCPT;
+                    socket.send(Reply::new(250, None, "ok")).await?;
+                }
+                _ => {
+                    socket
+                        .send(Reply::new(503, None, "bad sequence of commands"))
+                        .await?;
+                }
+            },
+            Command::DATA => match state {
+                State::RCPT => {
+                    socket.send(Reply::new(354, None, "send data")).await?;
+
+                    let body = handle_data(&mut socket).await?;
+                    socket
+                        .send(Reply::new(
+                            250,
+                            None,
+                            format!("{} bytes received, body ok", body.len()),
+                        ))
+                        .await?;
+
+                    state = State::Initial;
+                }
+                State::Initial => {
+                    socket
+                        .send(Reply::new(503, None, "mail transaction not started"))
+                        .await?;
+                }
+                State::MAIL => {
+                    socket
+                        .send(Reply::new(
+                            503,
+                            None,
+                            "must have at least one valid recipient",
+                        ))
+                        .await?;
+                }
+            },
             Command::QUIT => {
                 socket.send(Reply::new(250, None, "bye")).await?;
                 return Ok(LoopExit::Done);
+            }
+            Command::RSET => {
+                state = State::Initial;
+                socket.send(Reply::new(250, None, "ok")).await?;
             }
             _ => {
                 socket.send(Reply::new(250, None, "ok")).await?;
             }
         }
+        println!("State: {:?}\n", state);
     }
 }
 
