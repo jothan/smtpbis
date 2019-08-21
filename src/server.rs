@@ -11,9 +11,11 @@ use tokio::prelude::*;
 use tokio_rustls::rustls::{ServerConfig, ServerSession};
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
+use crate::{command, Command, Command::Base, Command::*};
 use crate::{LineCodec, LineError, Reply};
+
 use rustyknife::behaviour::Intl;
-use rustyknife::rfc5321::{command, Command};
+use rustyknife::rfc5321::Command::*;
 
 pub trait MaybeTLS {
     fn tls_session(&self) -> Option<&ServerSession> {
@@ -104,25 +106,7 @@ where
     loop {
         let cmd = match read_command(&mut socket).await {
             Ok(cmd) => cmd,
-            Err(ServerError::SyntaxError(badcmd)) => {
-                if !tls_session && badcmd.eq_ignore_ascii_case(b"STARTTLS\r\n") {
-                    println!("STARTTLS !");
-                    socket.flush().await?;
-                    let FramedParts { io, read_buf, .. } =
-                        socket.into_inner().into_inner().into_parts();
-                    // Absolutely do not allow pipelining past a
-                    // STARTTLS command.
-                    if !read_buf.is_empty() {
-                        return Err(ServerError::Pipelining);
-                    }
-
-                    let tls_reply = Reply::new(220, None, "starting TLS").to_string();
-
-                    io.write_all(tls_reply.as_bytes()).await?;
-                    io.flush().await?;
-                    return Ok(LoopExit::STARTTLS);
-                }
-
+            Err(ServerError::SyntaxError(_)) => {
                 socket
                     .send(Reply::new(500, None, "Invalid command syntax"))
                     .await?;
@@ -133,7 +117,7 @@ where
         println!("command: {:?}", cmd);
 
         match cmd {
-            Command::EHLO(_) => {
+            Base(EHLO(_)) => {
                 let mut reply_text = String::from("localhost\n");
                 for kw in &ehlo_keywords {
                     writeln!(reply_text, "{}", kw).unwrap();
@@ -141,11 +125,11 @@ where
                 state = State::Initial;
                 socket.send(Reply::new(250, None, reply_text)).await?;
             }
-            Command::HELO(_) => {
+            Base(HELO(_)) => {
                 state = State::Initial;
                 socket.send(Reply::new(250, None, "ok")).await?;
             }
-            Command::MAIL(_path, _) => match state {
+            Base(MAIL(_path, _)) => match state {
                 State::Initial => {
                     state = State::MAIL;
                     socket.send(Reply::new(250, None, "ok")).await?;
@@ -156,7 +140,7 @@ where
                         .await?;
                 }
             },
-            Command::RCPT(_path, _) => match state {
+            Base(RCPT(_path, _)) => match state {
                 State::MAIL | State::RCPT => {
                     state = State::RCPT;
                     socket.send(Reply::new(250, None, "ok")).await?;
@@ -167,7 +151,7 @@ where
                         .await?;
                 }
             },
-            Command::DATA => match state {
+            Base(DATA) => match state {
                 State::RCPT => {
                     socket.send(Reply::new(354, None, "send data")).await?;
 
@@ -197,16 +181,35 @@ where
                         .await?;
                 }
             },
-            Command::QUIT => {
+            Base(QUIT) => {
                 socket.send(Reply::new(250, None, "bye")).await?;
                 return Ok(LoopExit::Done);
             }
-            Command::RSET => {
+            Base(RSET) => {
                 state = State::Initial;
                 socket.send(Reply::new(250, None, "ok")).await?;
             }
+            Ext(crate::Ext::STARTTLS) if !tls_session => {
+                println!("STARTTLS !");
+                socket.flush().await?;
+                let FramedParts { io, read_buf, .. } =
+                    socket.into_inner().into_inner().into_parts();
+                // Absolutely do not allow pipelining past a
+                // STARTTLS command.
+                if !read_buf.is_empty() {
+                    return Err(ServerError::Pipelining);
+                }
+
+                let tls_reply = Reply::new(220, None, "starting TLS").to_string();
+
+                io.write_all(tls_reply.as_bytes()).await?;
+                io.flush().await?;
+                return Ok(LoopExit::STARTTLS);
+            }
             _ => {
-                socket.send(Reply::new(250, None, "ok")).await?;
+                socket
+                    .send(Reply::new(502, None, "command not implemented"))
+                    .await?;
             }
         }
         println!("State: {:?}\n", state);

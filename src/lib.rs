@@ -3,7 +3,9 @@
 mod codecs;
 mod reply;
 mod server;
+mod syntax;
 
 pub use codecs::{LineCodec, LineError};
 pub use reply::*;
 pub use server::*;
+pub use syntax::*;
