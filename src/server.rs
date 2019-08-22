@@ -1,7 +1,7 @@
 use std::fmt::Write;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::BytesMut;
 use futures_util::try_stream::*;
 use tokio::codec::{Framed, FramedParts};
@@ -16,6 +16,12 @@ use crate::{LineCodec, LineError, Reply};
 
 use rustyknife::behaviour::Intl;
 use rustyknife::rfc5321::Command::*;
+
+#[async_trait]
+pub trait Handler {
+    async fn tls_request(&mut self) -> Option<Arc<ServerConfig>>;
+    async fn tls_started(&mut self, session: &ServerSession);
+}
 
 pub trait MaybeTLS {
     fn tls_session(&self) -> Option<&ServerSession> {
@@ -39,34 +45,27 @@ impl<T> MaybeTLS for &mut TlsStream<T> {
     }
 }
 
-pub async fn smtp_server<S>(
-    mut socket: S,
-    addr: SocketAddr,
-    tls_config: Arc<ServerConfig>,
-) -> Result<(), ServerError>
+pub async fn smtp_server<S, H>(mut socket: S, handler: H) -> Result<(), ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS,
+    H: Handler,
 {
-    match smtp_server_loop(&mut socket, addr).await? {
+    match smtp_server_loop(&mut socket, handler).await? {
         LoopExit::Done => println!("Server exited without error"),
-        LoopExit::STARTTLS => {
-            println!("Starting TLS");
-            let acceptor = TlsAcceptor::from(tls_config);
-            let mut tls_socket = acceptor.accept(socket).await?;
-            match smtp_server_loop(&mut tls_socket, addr).await? {
-                LoopExit::Done => println!("(TLS) Server exited without error"),
-                LoopExit::STARTTLS => println!("(TLS) recursive TLS request :P"),
+        LoopExit::STARTTLS(tls_config, handler) => {
+            match starttls(socket, handler, tls_config).await? {
+                LoopExit::Done => println!("TLS server exited without error"),
+                LoopExit::STARTTLS(..) => println!("Nested TLS requested"),
             }
-            tls_socket.shutdown().await?;
         }
     }
 
     Ok(())
 }
 
-enum LoopExit {
+enum LoopExit<H> {
     Done,
-    STARTTLS,
+    STARTTLS(Arc<ServerConfig>, H),
 }
 
 #[derive(Debug, PartialEq)]
@@ -76,19 +75,46 @@ enum State {
     RCPT,
 }
 
-async fn smtp_server_loop<S>(base_socket: &mut S, addr: SocketAddr) -> Result<LoopExit, ServerError>
+async fn starttls<S, H>(
+    mut socket: S,
+    handler: H,
+    tls_config: Arc<ServerConfig>,
+) -> Result<LoopExit<H>, ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS,
+    H: Handler,
+{
+    println!("Starting TLS");
+    socket.flush().await?;
+    let acceptor = TlsAcceptor::from(tls_config);
+    let mut tls_socket = acceptor.accept(socket).await?;
+    let res = smtp_server_loop(&mut tls_socket, handler).await?;
+    tls_socket.shutdown().await?;
+    Ok(res)
+}
+
+async fn smtp_server_loop<S, H>(
+    base_socket: &mut S,
+    mut handler: H,
+) -> Result<LoopExit<H>, ServerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + MaybeTLS,
+    H: Handler,
 {
     let mut state = State::Initial;
-    let tls_session = base_socket.tls_session().is_some();
+    let tls_session = base_socket.tls_session();
+    if let Some(session) = &tls_session {
+        handler.tls_started(session).await;
+    }
+    let tls_session = tls_session.is_some();
+
     let mut ehlo_keywords = vec!["PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8", "CHUNKING"];
     if !tls_session {
         ehlo_keywords.push("STARTTLS");
     }
     ehlo_keywords.sort_unstable();
 
-    println!("{} connected, TLS:{:?} !", addr, tls_session);
+    println!("connected, TLS:{:?} !", tls_session);
 
     let mut socket = Framed::new(base_socket, LineCodec::default())
         .inspect(|line| println!("input: {:?}", line))
@@ -191,20 +217,25 @@ where
             }
             Ext(crate::Ext::STARTTLS) if !tls_session => {
                 println!("STARTTLS !");
-                socket.flush().await?;
-                let FramedParts { io, read_buf, .. } =
-                    socket.into_inner().into_inner().into_parts();
-                // Absolutely do not allow pipelining past a
-                // STARTTLS command.
-                if !read_buf.is_empty() {
-                    return Err(ServerError::Pipelining);
+
+                if let Some(tls_config) = handler.tls_request().await {
+                    socket.flush().await?;
+                    let FramedParts { io, read_buf, .. } =
+                        socket.into_inner().into_inner().into_parts();
+                    // Absolutely do not allow pipelining past a
+                    // STARTTLS command.
+                    if !read_buf.is_empty() {
+                        return Err(ServerError::Pipelining);
+                    }
+                    let tls_reply = Reply::new(220, None, "starting TLS").to_string();
+
+                    io.write_all(tls_reply.as_bytes()).await?;
+                    return Ok(LoopExit::STARTTLS(tls_config, handler));
+                } else {
+                    socket
+                        .send(Reply::new(502, None, "command not implemented"))
+                        .await?;
                 }
-
-                let tls_reply = Reply::new(220, None, "starting TLS").to_string();
-
-                io.write_all(tls_reply.as_bytes()).await?;
-                io.flush().await?;
-                return Ok(LoopExit::STARTTLS);
             }
             _ => {
                 socket
