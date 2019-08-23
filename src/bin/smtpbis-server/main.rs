@@ -56,8 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         tokio::spawn(async move {
-            let socket = socket;
-            smtp_server(socket, handler).await.unwrap();
+            if let Err(e) = smtp_server(socket, handler).await {
+                println!("Top level error: {:?}", e);
+            }
         });
     }
 }
