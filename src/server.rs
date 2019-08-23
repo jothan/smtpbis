@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use crate::{LineCodec, LineError, Reply};
 use rustyknife::behaviour::Intl;
 use rustyknife::rfc5321::Command::*;
 use rustyknife::rfc5321::{ForwardPath, Param, ReversePath};
+use rustyknife::types::{Domain, DomainPart};
 
 pub type HandlerResult = Result<Option<Reply>, Option<Reply>>;
 
@@ -23,12 +25,20 @@ pub type HandlerResult = Result<Option<Reply>, Option<Reply>>;
 pub trait Handler {
     async fn tls_request(&mut self) -> Option<Arc<ServerConfig>>;
     async fn tls_started(&mut self, session: &ServerSession);
+
+    async fn ehlo(
+        &mut self,
+        domain: DomainPart,
+        initial_keywords: EhloKeywords,
+    ) -> Result<(String, EhloKeywords), Reply>;
+    async fn helo(&mut self, domain: Domain) -> HandlerResult;
     async fn mail(&mut self, path: ReversePath, params: Vec<Param>) -> HandlerResult;
     async fn rcpt(&mut self, path: ForwardPath, params: Vec<Param>) -> HandlerResult;
     async fn data_start(&mut self) -> HandlerResult;
     async fn data<S>(&mut self, stream: &mut S) -> Result<Option<Reply>, ServerError>
     where
         S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send;
+    async fn rset(&mut self);
 }
 
 pub trait MaybeTLS {
@@ -117,12 +127,6 @@ where
     }
     let tls_session = tls_session.is_some();
 
-    let mut ehlo_keywords = vec!["PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8", "CHUNKING"];
-    if !tls_session {
-        ehlo_keywords.push("STARTTLS");
-    }
-    ehlo_keywords.sort_unstable();
-
     println!("connected, TLS:{:?} !", tls_session);
 
     let mut socket = Framed::new(base_socket, LineCodec::default())
@@ -152,13 +156,10 @@ where
         println!("command: {:?}", cmd);
 
         match cmd {
-            Base(EHLO(_)) => {
-                let mut reply_text = String::from("localhost\n");
-                for kw in &ehlo_keywords {
-                    writeln!(reply_text, "{}", kw).unwrap();
-                }
-                state = State::Initial;
-                socket.send(Reply::new(250, None, reply_text)).await?;
+            Base(EHLO(domain)) => {
+                socket
+                    .send(do_ehlo(&mut state, &mut handler, domain, tls_session).await?)
+                    .await?;
             }
             Base(HELO(_)) => {
                 state = State::Initial;
@@ -184,6 +185,7 @@ where
             }
             Base(RSET) => {
                 state = State::Initial;
+                handler.rset().await;
                 socket.send(Reply::new(250, None, "ok")).await?;
             }
             Ext(crate::Ext::STARTTLS) if !tls_session => {
@@ -216,6 +218,54 @@ where
         }
         println!("State: {:?}\n", state);
     }
+}
+
+pub type EhloKeywords = BTreeMap<String, Option<String>>;
+
+async fn do_ehlo<H: Handler>(
+    state: &mut State,
+    handler: &mut H,
+    domain: DomainPart,
+    is_tls: bool,
+) -> Result<Reply, ServerError> {
+    let mut initial_keywords = EhloKeywords::new();
+    for kw in ["PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8", "CHUNKING"].as_ref() {
+        initial_keywords.insert((*kw).into(), None);
+    }
+    if !is_tls {
+        initial_keywords.insert("STARTTLS".into(), None);
+    }
+
+    match handler.ehlo(domain, initial_keywords).await {
+        Err(reply) => Ok(reply),
+        Ok((greeting, keywords)) => {
+            assert!(!greeting.contains('\r') && !greeting.contains('\n'));
+            let mut reply_text = format!("{}\n", greeting);
+
+            for (kw, value) in keywords {
+                match value {
+                    Some(value) => writeln!(reply_text, "{} {}", kw, value).unwrap(),
+                    None => writeln!(reply_text, "{}", kw).unwrap(),
+                }
+            }
+            *state = State::Initial;
+            Ok(Reply::new(250, None, reply_text))
+        }
+    }
+}
+
+async fn do_helo<H: Handler>(
+    state: &mut State,
+    handler: &mut H,
+    domain: Domain,
+) -> Result<Reply, ServerError> {
+    Ok(match handler.helo(domain).await {
+        Ok(reply) => {
+            *state = State::Initial;
+            reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
+        }
+        Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "refused")),
+    })
 }
 
 async fn do_mail<H: Handler>(
