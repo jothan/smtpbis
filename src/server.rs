@@ -161,9 +161,10 @@ where
                     .send(do_ehlo(&mut state, &mut handler, domain, tls_session).await?)
                     .await?;
             }
-            Base(HELO(_)) => {
-                state = State::Initial;
-                socket.send(Reply::new(250, None, "ok")).await?;
+            Base(HELO(domain)) => {
+                socket
+                    .send(do_helo(&mut state, &mut handler, domain).await?)
+                    .await?;
             }
             Base(MAIL(path, params)) => {
                 socket
