@@ -20,7 +20,7 @@ pub enum Ext {
 
 pub fn command<P: UTF8Policy>(input: &[u8]) -> NomResult<'_, Command> {
     alt((
-        map(base_command::<P>, |c| Command::Base(c)),
+        map(base_command::<P>, Command::Base),
         map(starttls, |_| Command::Ext(Ext::STARTTLS)),
         map(bdat, |BDAT(size, last)| Command::Ext(Ext::BDAT(size, last))),
     ))(input)
