@@ -63,7 +63,7 @@ impl<T> MaybeTLS for &mut TlsStream<T> {
     }
 }
 
-pub async fn smtp_server<S, H>(mut socket: S, handler: H) -> Result<(), ServerError>
+pub async fn smtp_server<S, H>(mut socket: S, handler: H) -> Result<S, ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
     H: Handler,
@@ -71,14 +71,20 @@ where
     match smtp_server_loop(&mut socket, handler, true).await? {
         LoopExit::Done => println!("Server exited without error"),
         LoopExit::STARTTLS(tls_config, handler) => {
-            match starttls(socket, handler, tls_config).await? {
+            socket.flush().await?;
+            let acceptor = TlsAcceptor::from(tls_config);
+            let mut tls_socket = acceptor.accept(socket).await?;
+            match smtp_server_loop(&mut tls_socket, handler, false).await? {
                 LoopExit::Done => println!("TLS server exited without error"),
                 LoopExit::STARTTLS(..) => println!("Nested TLS requested"),
             }
+            tls_socket.shutdown().await?;
+            let (s, _) = tls_socket.into_inner();
+            socket = s;
         }
     }
 
-    Ok(())
+    Ok(socket)
 }
 
 enum LoopExit<H> {
@@ -91,24 +97,6 @@ enum State {
     Initial,
     MAIL,
     RCPT,
-}
-
-async fn starttls<S, H>(
-    mut socket: S,
-    handler: H,
-    tls_config: Arc<ServerConfig>,
-) -> Result<LoopExit<H>, ServerError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
-    H: Handler,
-{
-    println!("Starting TLS");
-    socket.flush().await?;
-    let acceptor = TlsAcceptor::from(tls_config);
-    let mut tls_socket = acceptor.accept(socket).await?;
-    let res = smtp_server_loop(&mut tls_socket, handler, false).await?;
-    tls_socket.shutdown().await?;
-    Ok(res)
 }
 
 async fn smtp_server_loop<S, H>(
