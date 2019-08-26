@@ -181,7 +181,7 @@ where
                 socket.send(reply).await?;
             }
             Base(QUIT) => {
-                socket.send(Reply::new(250, None, "bye")).await?;
+                socket.send(Reply::new(221, None, "bye")).await?;
                 return Ok(LoopExit::Done);
             }
             Base(RSET) => {
