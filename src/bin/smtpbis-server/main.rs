@@ -102,13 +102,8 @@ impl Handler for DummyHandler {
         self.body.clear();
 
         while let Some(line) = stream.next().await {
-            let line = line?;
-
-            self.body.extend(line);
+            self.body.extend(line?);
             nb_lines += 1;
-            if self.body.len() > 1000 {
-                return Ok(Some(Reply::new(521, None, "too large")));
-            }
         }
 
         println!("got {} body lines", nb_lines);
@@ -116,6 +111,25 @@ impl Handler for DummyHandler {
         self.reset_tx();
 
         Ok(Some(Reply::new(250, None, reply_txt)))
+    }
+
+    async fn bdat<S>(
+        &mut self,
+        stream: &mut S,
+        _size: u64,
+        last: bool,
+    ) -> Result<Option<Reply>, ServerError>
+    where
+        S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send,
+    {
+        while let Some(chunk) = stream.next().await {
+            self.body.extend(chunk?)
+        }
+        if last {
+            self.reset_tx();
+        }
+
+        Ok(None)
     }
 
     async fn rset(&mut self) {

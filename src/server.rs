@@ -38,6 +38,14 @@ pub trait Handler {
     async fn data<S>(&mut self, stream: &mut S) -> Result<Option<Reply>, ServerError>
     where
         S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send;
+    async fn bdat<S>(
+        &mut self,
+        stream: &mut S,
+        size: u64,
+        last: bool,
+    ) -> Result<Option<Reply>, ServerError>
+    where
+        S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send;
     async fn rset(&mut self);
 }
 
@@ -97,6 +105,8 @@ enum State {
     Initial,
     MAIL,
     RCPT,
+    BDAT,
+    BDATFAIL,
 }
 
 async fn smtp_server_loop<S, H>(
@@ -198,6 +208,17 @@ where
                         .send(Reply::new(502, None, "command not implemented"))
                         .await?;
                 }
+            }
+            Ext(crate::Ext::BDAT(size, last)) => {
+                let reply = do_bdat(
+                    socket.get_mut().get_mut(),
+                    &mut state,
+                    &mut handler,
+                    size,
+                    last,
+                )
+                .await?;
+                socket.send(reply).await?;
             }
             _ => {
                 socket
@@ -331,6 +352,48 @@ where
         },
         State::Initial => Reply::new(503, None, "mail transaction not started"),
         State::MAIL => Reply::new(503, None, "must have at least one valid recipient"),
+        State::BDAT | State::BDATFAIL => Reply::new(503, None, "BDAT may not be mixed with DATA"),
+    })
+}
+
+async fn do_bdat<H: Handler, S>(
+    socket: &mut Framed<S, LineCodec>,
+    state: &mut State,
+    handler: &mut H,
+    chunk_size: u64,
+    last: bool,
+) -> Result<Reply, ServerError>
+where
+    Framed<S, LineCodec>:
+        Stream<Item = Result<BytesMut, LineError>> + Sink<Reply, Error = LineError> + Send + Unpin,
+{
+    Ok(match state {
+        State::RCPT | State::BDAT => {
+            let mut body_stream = read_body_bdat(socket, chunk_size).fuse();
+
+            let reply = handler
+                .bdat(&mut body_stream, chunk_size, last)
+                .await
+                .map_err(|e| {
+                    *state = State::BDATFAIL;
+                    e
+                })?;
+
+            if !body_stream.is_done() {
+                drop(body_stream);
+                socket
+                    .send(reply.unwrap_or_else(|| Reply::new(550, None, "data abort")))
+                    .await?;
+
+                *state = State::BDATFAIL;
+                return Err(ServerError::DataAbort);
+            }
+
+            *state = if last { State::Initial } else { State::BDAT };
+            reply.unwrap_or_else(|| Reply::new(250, None, "data ok"))
+        }
+        State::MAIL => Reply::new(503, None, "must have at least one valid recipient"),
+        _ => Reply::new(503, None, "mail transaction not started"),
     })
 }
 
@@ -394,4 +457,24 @@ where
                 line
             })
         })
+}
+
+#[must_use]
+fn read_body_bdat<'a, S>(
+    socket: &'a mut Framed<S, LineCodec>,
+    size: u64,
+) -> impl Stream<Item = Result<BytesMut, LineError>> + 'a
+where
+    Framed<S, LineCodec>: Stream<Item = Result<BytesMut, LineError>> + Unpin,
+{
+    socket.codec_mut().chunking_mode(size);
+
+    socket.take_while(|chunk| {
+        let more = match chunk {
+            Err(LineError::ChunkingDone) => false,
+            _ => true,
+        };
+
+        tokio::future::ready(more)
+    })
 }
