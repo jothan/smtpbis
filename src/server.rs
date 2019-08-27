@@ -71,18 +71,18 @@ impl<T> MaybeTLS for &mut TlsStream<T> {
     }
 }
 
-pub async fn smtp_server<S, H>(mut socket: S, handler: H) -> Result<S, ServerError>
+pub async fn smtp_server<S, H>(mut socket: S, mut handler: H) -> Result<S, ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
     H: Handler,
 {
-    match smtp_server_loop(&mut socket, handler, true).await? {
+    match smtp_server_loop(&mut socket, &mut handler, true).await? {
         LoopExit::Done => println!("Server exited without error"),
-        LoopExit::STARTTLS(tls_config, handler) => {
+        LoopExit::STARTTLS(tls_config) => {
             socket.flush().await?;
             let acceptor = TlsAcceptor::from(tls_config);
             let mut tls_socket = acceptor.accept(socket).await?;
-            match smtp_server_loop(&mut tls_socket, handler, false).await? {
+            match smtp_server_loop(&mut tls_socket, &mut handler, false).await? {
                 LoopExit::Done => println!("TLS server exited without error"),
                 LoopExit::STARTTLS(..) => println!("Nested TLS requested"),
             }
@@ -95,9 +95,9 @@ where
     Ok(socket)
 }
 
-enum LoopExit<H> {
+enum LoopExit {
     Done,
-    STARTTLS(Arc<ServerConfig>, H),
+    STARTTLS(Arc<ServerConfig>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -111,9 +111,9 @@ enum State {
 
 async fn smtp_server_loop<S, H>(
     base_socket: &mut S,
-    mut handler: H,
+    handler: &mut H,
     banner: bool,
-) -> Result<LoopExit<H>, ServerError>
+) -> Result<LoopExit, ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
     H: Handler,
@@ -127,12 +127,7 @@ where
 
     println!("connected, TLS:{:?} !", tls_session);
 
-    let mut socket = Framed::new(base_socket, LineCodec::default())
-        .inspect(|line| println!("input: {:?}", line))
-        .with::<_, _, _, LineError>(|reply| {
-            print!("output: {}", reply);
-            tokio::future::ok(reply)
-        });
+    let mut socket = Framed::new(base_socket, LineCodec::default());
 
     if banner {
         socket
@@ -153,81 +148,96 @@ where
         };
         println!("command: {:?}", cmd);
 
-        match cmd {
-            Base(EHLO(domain)) => {
-                socket
-                    .send(do_ehlo(&mut state, &mut handler, domain, tls_session).await?)
-                    .await?;
+        match dispatch_command(&mut socket, &mut state, handler, cmd).await? {
+            Some(LoopExit::STARTTLS(tls_config)) => {
+                socket.flush().await?;
+                let FramedParts { io, read_buf, .. } = socket.into_parts();
+                // Absolutely do not allow pipelining past a
+                // STARTTLS command.
+                if !read_buf.is_empty() {
+                    return Err(ServerError::Pipelining);
+                }
+                let tls_reply = Reply::new(220, None, "starting TLS").to_string();
+
+                io.write_all(tls_reply.as_bytes()).await?;
+                return Ok(LoopExit::STARTTLS(tls_config));
             }
-            Base(HELO(domain)) => {
-                socket
-                    .send(do_helo(&mut state, &mut handler, domain).await?)
-                    .await?;
-            }
-            Base(MAIL(path, params)) => {
-                socket
-                    .send(do_mail(&mut state, &mut handler, path, params).await?)
-                    .await?;
-            }
-            Base(RCPT(path, params)) => {
-                socket
-                    .send(do_rcpt(&mut state, &mut handler, path, params).await?)
-                    .await?;
-            }
-            Base(DATA) => {
-                let reply = do_data(&mut socket, &mut state, &mut handler).await?;
-                socket.send(reply).await?;
-            }
-            Base(QUIT) => {
-                socket.send(Reply::new(221, None, "bye")).await?;
+            Some(LoopExit::Done) => {
                 return Ok(LoopExit::Done);
             }
-            Base(RSET) => {
-                state = State::Initial;
-                handler.rset().await;
-                socket.send(Reply::new(250, None, "ok")).await?;
-            }
-            Ext(crate::Ext::STARTTLS) if !tls_session => {
-                println!("STARTTLS !");
+            None => {}
+        }
 
-                if let Some(tls_config) = handler.tls_request().await {
-                    socket.flush().await?;
-                    let FramedParts { io, read_buf, .. } =
-                        socket.into_inner().into_inner().into_parts();
-                    // Absolutely do not allow pipelining past a
-                    // STARTTLS command.
-                    if !read_buf.is_empty() {
-                        return Err(ServerError::Pipelining);
-                    }
-                    let tls_reply = Reply::new(220, None, "starting TLS").to_string();
+        println!("State: {:?}\n", state);
+    }
+}
 
-                    io.write_all(tls_reply.as_bytes()).await?;
-                    return Ok(LoopExit::STARTTLS(tls_config, handler));
-                } else {
-                    socket
-                        .send(Reply::new(502, None, "command not implemented"))
-                        .await?;
-                }
-            }
-            Ext(crate::Ext::BDAT(size, last)) => {
-                let reply = do_bdat(
-                    socket.get_mut().get_mut(),
-                    &mut state,
-                    &mut handler,
-                    size,
-                    last,
-                )
+async fn dispatch_command<H, S>(
+    socket: &mut Framed<&mut S, LineCodec>,
+    state: &mut State,
+    handler: &mut H,
+    command: Command,
+) -> Result<Option<LoopExit>, ServerError>
+where
+    H: Handler,
+    S: AsyncRead + AsyncWrite + MaybeTLS + Unpin + Send,
+{
+    let is_tls = socket.get_ref().tls_session().is_some();
+
+    match command {
+        Base(EHLO(domain)) => {
+            socket
+                .send(do_ehlo(state, handler, domain, is_tls).await?)
                 .await?;
-                socket.send(reply).await?;
-            }
-            _ => {
+        }
+        Base(HELO(domain)) => {
+            socket.send(do_helo(state, handler, domain).await?).await?;
+        }
+        Base(MAIL(path, params)) => {
+            socket
+                .send(do_mail(state, handler, path, params).await?)
+                .await?;
+        }
+        Base(RCPT(path, params)) => {
+            socket
+                .send(do_rcpt(state, handler, path, params).await?)
+                .await?;
+        }
+        Base(DATA) => {
+            let reply = do_data(socket, state, handler).await?;
+            socket.send(reply).await?;
+        }
+        Base(QUIT) => {
+            socket.send(Reply::new(221, None, "bye")).await?;
+            return Ok(Some(LoopExit::Done));
+        }
+        Base(RSET) => {
+            *state = State::Initial;
+            handler.rset().await;
+            socket.send(Reply::new(250, None, "ok")).await?;
+        }
+        Ext(crate::Ext::STARTTLS) if !is_tls => {
+            println!("STARTTLS !");
+
+            if let Some(tls_config) = handler.tls_request().await {
+                return Ok(Some(LoopExit::STARTTLS(tls_config)));
+            } else {
                 socket
                     .send(Reply::new(502, None, "command not implemented"))
                     .await?;
             }
         }
-        println!("State: {:?}\n", state);
+        Ext(crate::Ext::BDAT(size, last)) => {
+            let reply = do_bdat(socket, state, handler, size, last).await?;
+            socket.send(reply).await?;
+        }
+        _ => {
+            socket
+                .send(Reply::new(502, None, "command not implemented"))
+                .await?;
+        }
     }
+    Ok(None)
 }
 
 pub type EhloKeywords = BTreeMap<String, Option<String>>;
@@ -333,7 +343,7 @@ where
                     .send(reply.unwrap_or_else(|| Reply::new(354, None, "send data")))
                     .await?;
 
-                let mut body_stream = read_body(socket).fuse();
+                let mut body_stream = read_body_data(socket).fuse();
                 let reply = handler.data(&mut body_stream).await?;
 
                 if !body_stream.is_done() {
@@ -437,7 +447,7 @@ where
 }
 
 #[must_use]
-fn read_body<'a, S>(source: &'a mut S) -> impl Stream<Item = Result<BytesMut, LineError>> + 'a
+fn read_body_data<'a, S>(source: &'a mut S) -> impl Stream<Item = Result<BytesMut, LineError>> + 'a
 where
     S: Stream<Item = Result<BytesMut, LineError>> + Unpin,
 {

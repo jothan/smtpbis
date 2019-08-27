@@ -53,7 +53,7 @@ impl Handler for DummyHandler {
         initial_keywords.insert("8BITMIME".into(), None);
         initial_keywords.insert("SIZE".into(), Some("73400320".into()));
 
-        let greet = format!("hello {} from {}", domain, self.addr).into();
+        let greet = format!("hello {} from {}", domain, self.addr);
         self.helo = Some(domain);
         self.reset_tx();
 
