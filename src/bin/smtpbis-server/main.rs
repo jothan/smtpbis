@@ -44,6 +44,7 @@ impl Handler for DummyHandler {
             session.get_protocol_version(),
             session.get_negotiated_ciphersuite()
         );
+        self.reset_tx();
     }
 
     async fn ehlo(
