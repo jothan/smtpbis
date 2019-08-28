@@ -20,6 +20,7 @@ use rustyknife::rfc5321::{ForwardPath, Param, ReversePath};
 use rustyknife::types::{Domain, DomainPart};
 
 pub type HandlerResult = Result<Option<Reply>, Option<Reply>>;
+pub type EhloKeywords = BTreeMap<String, Option<String>>;
 
 #[async_trait]
 pub trait Handler {
@@ -89,18 +90,30 @@ impl<T> MaybeTLS for &mut TlsStream<T> {
     }
 }
 
-pub async fn smtp_server<S, H>(mut socket: S, mut handler: H, config: &Config) -> Result<S, ServerError>
+pub async fn smtp_server<S, H>(
+    mut socket: S,
+    mut handler: H,
+    config: &Config,
+) -> Result<S, ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
     H: Handler,
 {
-    match smtp_server_loop(&mut socket, &mut handler, config, true).await? {
+    let mut server = InnerServer {
+        handler: &mut handler,
+        config,
+        state: State::Initial,
+    };
+
+    match server.serve(&mut socket, true).await? {
         LoopExit::Done => println!("Server exited without error"),
         LoopExit::STARTTLS(tls_config) => {
             socket.flush().await?;
             let acceptor = TlsAcceptor::from(tls_config);
             let mut tls_socket = acceptor.accept(socket).await?;
-            match smtp_server_loop(&mut tls_socket, &mut handler, config, false).await? {
+
+            server.state = State::Initial;
+            match server.serve(&mut tls_socket, false).await? {
                 LoopExit::Done => println!("TLS server exited without error"),
                 LoopExit::STARTTLS(..) => println!("Nested TLS requested"),
             }
@@ -127,251 +140,276 @@ enum State {
     BDATFAIL,
 }
 
-async fn smtp_server_loop<S, H>(
-    base_socket: &mut S,
-    handler: &mut H,
-    config: &Config,
-    banner: bool,
-) -> Result<LoopExit, ServerError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
-    H: Handler,
-{
-    let mut state = State::Initial;
-    let tls_session = base_socket.tls_session();
-    if let Some(session) = &tls_session {
-        handler.tls_started(session).await;
-    }
-    let tls_session = tls_session.is_some();
-
-    println!("connected, TLS:{:?} !", tls_session);
-
-    let mut socket = Framed::new(base_socket, LineCodec::default());
-
-    if banner {
-        socket
-            .send(Reply::new(220, None, "localhost ESMTP smtpbis 0.1.0"))
-            .await?;
-    }
-
-    loop {
-        let cmd = match read_command(&mut socket, config.enable_smtputf8).await {
-            Ok(cmd) => cmd,
-            Err(ServerError::SyntaxError(_)) => {
-                socket
-                    .send(Reply::new(500, None, "Invalid command syntax"))
-                    .await?;
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        println!("command: {:?}", cmd);
-
-        match dispatch_command(&mut socket, &mut state, handler, config, cmd).await? {
-            Some(LoopExit::STARTTLS(tls_config)) => {
-                socket.flush().await?;
-                let FramedParts { io, read_buf, .. } = socket.into_parts();
-                // Absolutely do not allow pipelining past a
-                // STARTTLS command.
-                if !read_buf.is_empty() {
-                    return Err(ServerError::Pipelining);
-                }
-                let tls_reply = Reply::new(220, None, "starting TLS").to_string();
-
-                io.write_all(tls_reply.as_bytes()).await?;
-                return Ok(LoopExit::STARTTLS(tls_config));
-            }
-            Some(LoopExit::Done) => {
-                return Ok(LoopExit::Done);
-            }
-            None => {}
-        }
-
-        println!("State: {:?}\n", state);
-    }
+struct InnerServer<'a, H> {
+    handler: &'a mut H,
+    config: &'a Config,
+    state: State,
 }
 
-async fn dispatch_command<H, S>(
-    socket: &mut Framed<&mut S, LineCodec>,
-    state: &mut State,
-    handler: &mut H,
-    config: &Config,
-    command: Command,
-) -> Result<Option<LoopExit>, ServerError>
+impl<'a, H> InnerServer<'a, H>
 where
     H: Handler,
-    S: AsyncRead + AsyncWrite + MaybeTLS + Unpin + Send,
 {
-    let is_tls = socket.get_ref().tls_session().is_some();
+    async fn serve<S>(&mut self, base_socket: &mut S, banner: bool) -> Result<LoopExit, ServerError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
+    {
+        let tls_session = base_socket.tls_session();
+        if let Some(session) = &tls_session {
+            self.handler.tls_started(session).await;
+        }
+        let tls_session = tls_session.is_some();
 
-    match command {
-        Base(EHLO(domain)) => {
-            socket
-                .send(do_ehlo(state, handler, config, is_tls, domain).await?)
-                .await?;
-        }
-        Base(HELO(domain)) => {
-            socket.send(do_helo(state, handler, domain).await?).await?;
-        }
-        Base(MAIL(path, params)) => {
-            socket
-                .send(do_mail(state, handler, path, params).await?)
-                .await?;
-        }
-        Base(RCPT(path, params)) => {
-            socket
-                .send(do_rcpt(state, handler, path, params).await?)
-                .await?;
-        }
-        Base(DATA) => {
-            let reply = do_data(socket, state, handler).await?;
-            socket.send(reply).await?;
-        }
-        Base(QUIT) => {
-            socket.send(Reply::new(221, None, "bye")).await?;
-            return Ok(Some(LoopExit::Done));
-        }
-        Base(RSET) => {
-            *state = State::Initial;
-            handler.rset().await;
-            socket.send(Reply::new(250, None, "ok")).await?;
-        }
-        Ext(crate::Ext::STARTTLS) if config.enable_starttls && !is_tls => {
-            println!("STARTTLS !");
+        println!("connected, TLS:{:?} !", tls_session);
 
-            if let Some(tls_config) = handler.tls_request().await {
-                return Ok(Some(LoopExit::STARTTLS(tls_config)));
-            } else {
+        let mut socket = Framed::new(base_socket, LineCodec::default());
+
+        if banner {
+            socket
+                .send(Reply::new(220, None, "localhost ESMTP smtpbis 0.1.0"))
+                .await?;
+        }
+
+        loop {
+            let cmd = match read_command(&mut socket, self.config.enable_smtputf8).await {
+                Ok(cmd) => cmd,
+                Err(ServerError::SyntaxError(_)) => {
+                    socket
+                        .send(Reply::new(500, None, "Invalid command syntax"))
+                        .await?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            println!("command: {:?}", cmd);
+
+            match self.dispatch_command(&mut socket, cmd).await? {
+                Some(LoopExit::STARTTLS(tls_config)) => {
+                    socket.flush().await?;
+                    let FramedParts { io, read_buf, .. } = socket.into_parts();
+                    // Absolutely do not allow pipelining past a
+                    // STARTTLS command.
+                    if !read_buf.is_empty() {
+                        return Err(ServerError::Pipelining);
+                    }
+                    let tls_reply = Reply::new(220, None, "starting TLS").to_string();
+
+                    io.write_all(tls_reply.as_bytes()).await?;
+                    return Ok(LoopExit::STARTTLS(tls_config));
+                }
+                Some(LoopExit::Done) => {
+                    return Ok(LoopExit::Done);
+                }
+                None => {}
+            }
+
+            println!("State: {:?}\n", self.state);
+        }
+    }
+
+    async fn dispatch_command<S>(
+        &mut self,
+        socket: &mut Framed<&mut S, LineCodec>,
+        command: Command,
+    ) -> Result<Option<LoopExit>, ServerError>
+    where
+        S: AsyncRead + AsyncWrite + MaybeTLS + Unpin + Send,
+    {
+        let is_tls = socket.get_ref().tls_session().is_some();
+
+        match command {
+            Base(EHLO(domain)) => {
+                socket.send(self.do_ehlo(is_tls, domain).await?).await?;
+            }
+            Base(HELO(domain)) => {
+                socket.send(self.do_helo(domain).await?).await?;
+            }
+            Base(MAIL(path, params)) => {
+                socket.send(self.do_mail(path, params).await?).await?;
+            }
+            Base(RCPT(path, params)) => {
+                socket.send(self.do_rcpt(path, params).await?).await?;
+            }
+            Base(DATA) => {
+                let reply = self.do_data(socket).await?;
+                socket.send(reply).await?;
+            }
+            Base(QUIT) => {
+                socket.send(Reply::new(221, None, "bye")).await?;
+                return Ok(Some(LoopExit::Done));
+            }
+            Base(RSET) => {
+                self.state = State::Initial;
+                self.handler.rset().await;
+                socket.send(Reply::new(250, None, "ok")).await?;
+            }
+            Ext(crate::Ext::STARTTLS) if self.config.enable_starttls && !is_tls => {
+                println!("STARTTLS !");
+
+                if let Some(tls_config) = self.handler.tls_request().await {
+                    return Ok(Some(LoopExit::STARTTLS(tls_config)));
+                } else {
+                    socket
+                        .send(Reply::new(502, None, "command not implemented"))
+                        .await?;
+                }
+            }
+            Ext(crate::Ext::BDAT(size, last)) if self.config.enable_chunking => {
+                let reply = self.do_bdat(socket, size, last).await?;
+                socket.send(reply).await?;
+            }
+            _ => {
                 socket
                     .send(Reply::new(502, None, "command not implemented"))
                     .await?;
             }
         }
-        Ext(crate::Ext::BDAT(size, last)) if config.enable_chunking => {
-            let reply = do_bdat(socket, state, handler, size, last).await?;
-            socket.send(reply).await?;
+        Ok(None)
+    }
+
+    async fn do_ehlo(&mut self, is_tls: bool, domain: DomainPart) -> Result<Reply, ServerError> {
+        let mut initial_keywords = EhloKeywords::new();
+        for kw in ["PIPELINING", "ENHANCEDSTATUSCODES"].as_ref() {
+            initial_keywords.insert((*kw).into(), None);
         }
-        _ => {
-            socket
-                .send(Reply::new(502, None, "command not implemented"))
-                .await?;
+        if self.config.enable_smtputf8 {
+            initial_keywords.insert("SMTPUTF8".into(), None);
         }
-    }
-    Ok(None)
-}
+        if self.config.enable_chunking {
+            initial_keywords.insert("CHUNKING".into(), None);
+        }
+        if self.config.enable_starttls && !is_tls {
+            initial_keywords.insert("STARTTLS".into(), None);
+        }
 
-pub type EhloKeywords = BTreeMap<String, Option<String>>;
+        match self.handler.ehlo(domain, initial_keywords).await {
+            Err(reply) => Ok(reply),
+            Ok((greeting, keywords)) => {
+                assert!(!greeting.contains('\r') && !greeting.contains('\n'));
+                let mut reply_text = format!("{}\n", greeting);
 
-async fn do_ehlo<H: Handler>(
-    state: &mut State,
-    handler: &mut H,
-    config: &Config,
-    is_tls: bool,
-    domain: DomainPart,
-) -> Result<Reply, ServerError> {
-    let mut initial_keywords = EhloKeywords::new();
-    for kw in ["PIPELINING", "ENHANCEDSTATUSCODES"].as_ref() {
-        initial_keywords.insert((*kw).into(), None);
-    }
-    if config.enable_smtputf8 {
-        initial_keywords.insert("SMTPUTF8".into(), None);
-    }
-    if config.enable_chunking {
-        initial_keywords.insert("CHUNKING".into(), None);
-    }
-    if config.enable_starttls && !is_tls {
-        initial_keywords.insert("STARTTLS".into(), None);
-    }
-
-    match handler.ehlo(domain, initial_keywords).await {
-        Err(reply) => Ok(reply),
-        Ok((greeting, keywords)) => {
-            assert!(!greeting.contains('\r') && !greeting.contains('\n'));
-            let mut reply_text = format!("{}\n", greeting);
-
-            for (kw, value) in keywords {
-                match value {
-                    Some(value) => writeln!(reply_text, "{} {}", kw, value).unwrap(),
-                    None => writeln!(reply_text, "{}", kw).unwrap(),
+                for (kw, value) in keywords {
+                    match value {
+                        Some(value) => writeln!(reply_text, "{} {}", kw, value).unwrap(),
+                        None => writeln!(reply_text, "{}", kw).unwrap(),
+                    }
                 }
+                self.state = State::Initial;
+                Ok(Reply::new(250, None, reply_text))
             }
-            *state = State::Initial;
-            Ok(Reply::new(250, None, reply_text))
         }
     }
-}
 
-async fn do_helo<H: Handler>(
-    state: &mut State,
-    handler: &mut H,
-    domain: Domain,
-) -> Result<Reply, ServerError> {
-    Ok(match handler.helo(domain).await {
-        Ok(reply) => {
-            *state = State::Initial;
-            reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
-        }
-        Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "refused")),
-    })
-}
-
-async fn do_mail<H: Handler>(
-    state: &mut State,
-    handler: &mut H,
-    path: ReversePath,
-    params: Vec<Param>,
-) -> Result<Reply, ServerError> {
-    Ok(match state {
-        State::Initial => match handler.mail(path, params).await {
+    async fn do_helo(&mut self, domain: Domain) -> Result<Reply, ServerError> {
+        Ok(match self.handler.helo(domain).await {
             Ok(reply) => {
-                *state = State::MAIL;
+                self.state = State::Initial;
                 reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
             }
-            Err(reply) => {
-                reply.unwrap_or_else(|| Reply::new(550, None, "mail transaction refused"))
+            Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "refused")),
+        })
+    }
+
+    async fn do_mail(
+        &mut self,
+        path: ReversePath,
+        params: Vec<Param>,
+    ) -> Result<Reply, ServerError> {
+        Ok(match self.state {
+            State::Initial => match self.handler.mail(path, params).await {
+                Ok(reply) => {
+                    self.state = State::MAIL;
+                    reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
+                }
+                Err(reply) => {
+                    reply.unwrap_or_else(|| Reply::new(550, None, "mail transaction refused"))
+                }
+            },
+            _ => Reply::new(503, None, "bad sequence of commands"),
+        })
+    }
+
+    async fn do_rcpt(
+        &mut self,
+        path: ForwardPath,
+        params: Vec<Param>,
+    ) -> Result<Reply, ServerError> {
+        Ok(match self.state {
+            State::MAIL | State::RCPT => match self.handler.rcpt(path, params).await {
+                Ok(reply) => {
+                    self.state = State::RCPT;
+                    reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
+                }
+                Err(reply) => {
+                    reply.unwrap_or_else(|| Reply::new(550, None, "recipient not accepted"))
+                }
+            },
+            _ => Reply::new(503, None, "bad sequence of commands"),
+        })
+    }
+
+    async fn do_data<S>(&mut self, socket: &mut S) -> Result<Reply, ServerError>
+    where
+        S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send,
+        S: Sink<Reply>,
+        ServerError: From<<S as Sink<Reply>>::Error>,
+    {
+        Ok(match self.state {
+            State::RCPT => match self.handler.data_start().await {
+                Ok(reply) => {
+                    socket
+                        .send(reply.unwrap_or_else(|| Reply::new(354, None, "send data")))
+                        .await?;
+
+                    let mut body_stream = read_body_data(socket).fuse();
+                    let reply = self.handler.data(&mut body_stream).await?;
+
+                    if !body_stream.is_done() {
+                        drop(body_stream);
+                        socket
+                            .send(reply.unwrap_or_else(|| Reply::new(550, None, "data abort")))
+                            .await?;
+
+                        return Err(ServerError::DataAbort);
+                    }
+
+                    self.state = State::Initial;
+                    reply.unwrap_or_else(|| Reply::new(250, None, "body ok"))
+                }
+                Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "data not accepted")),
+            },
+            State::Initial => Reply::new(503, None, "mail transaction not started"),
+            State::MAIL => Reply::new(503, None, "must have at least one valid recipient"),
+            State::BDAT | State::BDATFAIL => {
+                Reply::new(503, None, "BDAT may not be mixed with DATA")
             }
-        },
-        _ => Reply::new(503, None, "bad sequence of commands"),
-    })
-}
+        })
+    }
 
-async fn do_rcpt<H: Handler>(
-    state: &mut State,
-    handler: &mut H,
-    path: ForwardPath,
-    params: Vec<Param>,
-) -> Result<Reply, ServerError> {
-    Ok(match state {
-        State::MAIL | State::RCPT => match handler.rcpt(path, params).await {
-            Ok(reply) => {
-                *state = State::RCPT;
-                reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
-            }
-            Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "recipient not accepted")),
-        },
-        _ => Reply::new(503, None, "bad sequence of commands"),
-    })
-}
+    async fn do_bdat<S>(
+        &mut self,
+        socket: &mut Framed<S, LineCodec>,
+        chunk_size: u64,
+        last: bool,
+    ) -> Result<Reply, ServerError>
+    where
+        Framed<S, LineCodec>: Stream<Item = Result<BytesMut, LineError>>
+            + Sink<Reply, Error = LineError>
+            + Send
+            + Unpin,
+    {
+        Ok(match self.state {
+            State::RCPT | State::BDAT => {
+                let mut body_stream = read_body_bdat(socket, chunk_size).fuse();
 
-async fn do_data<H: Handler, S>(
-    socket: &mut S,
-    state: &mut State,
-    handler: &mut H,
-) -> Result<Reply, ServerError>
-where
-    S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send,
-    S: Sink<Reply>,
-    ServerError: From<<S as Sink<Reply>>::Error>,
-{
-    Ok(match state {
-        State::RCPT => match handler.data_start().await {
-            Ok(reply) => {
-                socket
-                    .send(reply.unwrap_or_else(|| Reply::new(354, None, "send data")))
-                    .await?;
-
-                let mut body_stream = read_body_data(socket).fuse();
-                let reply = handler.data(&mut body_stream).await?;
+                let reply = self
+                    .handler
+                    .bdat(&mut body_stream, chunk_size, last)
+                    .await
+                    .map_err(|e| {
+                        self.state = State::BDATFAIL;
+                        e
+                    })?;
 
                 if !body_stream.is_done() {
                     drop(body_stream);
@@ -379,59 +417,17 @@ where
                         .send(reply.unwrap_or_else(|| Reply::new(550, None, "data abort")))
                         .await?;
 
+                    self.state = State::BDATFAIL;
                     return Err(ServerError::DataAbort);
                 }
 
-                *state = State::Initial;
-                reply.unwrap_or_else(|| Reply::new(250, None, "body ok"))
+                self.state = if last { State::Initial } else { State::BDAT };
+                reply.unwrap_or_else(|| Reply::new(250, None, "data ok"))
             }
-            Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "data not accepted")),
-        },
-        State::Initial => Reply::new(503, None, "mail transaction not started"),
-        State::MAIL => Reply::new(503, None, "must have at least one valid recipient"),
-        State::BDAT | State::BDATFAIL => Reply::new(503, None, "BDAT may not be mixed with DATA"),
-    })
-}
-
-async fn do_bdat<H: Handler, S>(
-    socket: &mut Framed<S, LineCodec>,
-    state: &mut State,
-    handler: &mut H,
-    chunk_size: u64,
-    last: bool,
-) -> Result<Reply, ServerError>
-where
-    Framed<S, LineCodec>:
-        Stream<Item = Result<BytesMut, LineError>> + Sink<Reply, Error = LineError> + Send + Unpin,
-{
-    Ok(match state {
-        State::RCPT | State::BDAT => {
-            let mut body_stream = read_body_bdat(socket, chunk_size).fuse();
-
-            let reply = handler
-                .bdat(&mut body_stream, chunk_size, last)
-                .await
-                .map_err(|e| {
-                    *state = State::BDATFAIL;
-                    e
-                })?;
-
-            if !body_stream.is_done() {
-                drop(body_stream);
-                socket
-                    .send(reply.unwrap_or_else(|| Reply::new(550, None, "data abort")))
-                    .await?;
-
-                *state = State::BDATFAIL;
-                return Err(ServerError::DataAbort);
-            }
-
-            *state = if last { State::Initial } else { State::BDAT };
-            reply.unwrap_or_else(|| Reply::new(250, None, "data ok"))
-        }
-        State::MAIL => Reply::new(503, None, "must have at least one valid recipient"),
-        _ => Reply::new(503, None, "mail transaction not started"),
-    })
+            State::MAIL => Reply::new(503, None, "must have at least one valid recipient"),
+            _ => Reply::new(503, None, "mail transaction not started"),
+        })
+    }
 }
 
 #[derive(Debug)]

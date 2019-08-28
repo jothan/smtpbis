@@ -16,7 +16,9 @@ use tokio_rustls::rustls::{
 
 use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
 use rustyknife::types::{Domain, DomainPart, Mailbox};
-use smtpbis::{smtp_server, EhloKeywords, Handler, HandlerResult, LineError, Reply, ServerError, Config};
+use smtpbis::{
+    smtp_server, Config, EhloKeywords, Handler, HandlerResult, LineError, Reply, ServerError,
+};
 
 const CERT: &[u8] = include_bytes!("ssl-cert-snakeoil.pem");
 const KEY: &[u8] = include_bytes!("ssl-cert-snakeoil.key");
