@@ -16,7 +16,7 @@ use tokio_rustls::rustls::{
 
 use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
 use rustyknife::types::{Domain, DomainPart, Mailbox};
-use smtpbis::{smtp_server, EhloKeywords, Handler, HandlerResult, LineError, Reply, ServerError};
+use smtpbis::{smtp_server, EhloKeywords, Handler, HandlerResult, LineError, Reply, ServerError, Config};
 
 const CERT: &[u8] = include_bytes!("ssl-cert-snakeoil.pem");
 const KEY: &[u8] = include_bytes!("ssl-cert-snakeoil.key");
@@ -169,7 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         tokio::spawn(async move {
-            if let Err(e) = smtp_server(socket, handler).await {
+            let config = Config::default();
+            if let Err(e) = smtp_server(socket, handler, &config).await {
                 println!("Top level error: {:?}", e);
             }
         });

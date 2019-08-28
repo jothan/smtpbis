@@ -14,7 +14,7 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use crate::{command, Command, Command::Base, Command::*};
 use crate::{LineCodec, LineError, Reply};
 
-use rustyknife::behaviour::Intl;
+use rustyknife::behaviour::{Intl, Legacy};
 use rustyknife::rfc5321::Command::*;
 use rustyknife::rfc5321::{ForwardPath, Param, ReversePath};
 use rustyknife::types::{Domain, DomainPart};
@@ -32,8 +32,11 @@ pub trait Handler {
         initial_keywords: EhloKeywords,
     ) -> Result<(String, EhloKeywords), Reply>;
     async fn helo(&mut self, domain: Domain) -> HandlerResult;
+    async fn rset(&mut self);
+
     async fn mail(&mut self, path: ReversePath, params: Vec<Param>) -> HandlerResult;
     async fn rcpt(&mut self, path: ForwardPath, params: Vec<Param>) -> HandlerResult;
+
     async fn data_start(&mut self) -> HandlerResult;
     async fn data<S>(&mut self, stream: &mut S) -> Result<Option<Reply>, ServerError>
     where
@@ -46,7 +49,22 @@ pub trait Handler {
     ) -> Result<Option<Reply>, ServerError>
     where
         S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send;
-    async fn rset(&mut self);
+}
+
+pub struct Config {
+    pub enable_smtputf8: bool,
+    pub enable_chunking: bool,
+    pub enable_starttls: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            enable_smtputf8: true,
+            enable_chunking: true,
+            enable_starttls: true,
+        }
+    }
 }
 
 pub trait MaybeTLS {
@@ -71,18 +89,18 @@ impl<T> MaybeTLS for &mut TlsStream<T> {
     }
 }
 
-pub async fn smtp_server<S, H>(mut socket: S, mut handler: H) -> Result<S, ServerError>
+pub async fn smtp_server<S, H>(mut socket: S, mut handler: H, config: &Config) -> Result<S, ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
     H: Handler,
 {
-    match smtp_server_loop(&mut socket, &mut handler, true).await? {
+    match smtp_server_loop(&mut socket, &mut handler, config, true).await? {
         LoopExit::Done => println!("Server exited without error"),
         LoopExit::STARTTLS(tls_config) => {
             socket.flush().await?;
             let acceptor = TlsAcceptor::from(tls_config);
             let mut tls_socket = acceptor.accept(socket).await?;
-            match smtp_server_loop(&mut tls_socket, &mut handler, false).await? {
+            match smtp_server_loop(&mut tls_socket, &mut handler, config, false).await? {
                 LoopExit::Done => println!("TLS server exited without error"),
                 LoopExit::STARTTLS(..) => println!("Nested TLS requested"),
             }
@@ -112,6 +130,7 @@ enum State {
 async fn smtp_server_loop<S, H>(
     base_socket: &mut S,
     handler: &mut H,
+    config: &Config,
     banner: bool,
 ) -> Result<LoopExit, ServerError>
 where
@@ -136,7 +155,7 @@ where
     }
 
     loop {
-        let cmd = match read_command(&mut socket).await {
+        let cmd = match read_command(&mut socket, config.enable_smtputf8).await {
             Ok(cmd) => cmd,
             Err(ServerError::SyntaxError(_)) => {
                 socket
@@ -148,7 +167,7 @@ where
         };
         println!("command: {:?}", cmd);
 
-        match dispatch_command(&mut socket, &mut state, handler, cmd).await? {
+        match dispatch_command(&mut socket, &mut state, handler, config, cmd).await? {
             Some(LoopExit::STARTTLS(tls_config)) => {
                 socket.flush().await?;
                 let FramedParts { io, read_buf, .. } = socket.into_parts();
@@ -176,6 +195,7 @@ async fn dispatch_command<H, S>(
     socket: &mut Framed<&mut S, LineCodec>,
     state: &mut State,
     handler: &mut H,
+    config: &Config,
     command: Command,
 ) -> Result<Option<LoopExit>, ServerError>
 where
@@ -187,7 +207,7 @@ where
     match command {
         Base(EHLO(domain)) => {
             socket
-                .send(do_ehlo(state, handler, domain, is_tls).await?)
+                .send(do_ehlo(state, handler, config, is_tls, domain).await?)
                 .await?;
         }
         Base(HELO(domain)) => {
@@ -216,7 +236,7 @@ where
             handler.rset().await;
             socket.send(Reply::new(250, None, "ok")).await?;
         }
-        Ext(crate::Ext::STARTTLS) if !is_tls => {
+        Ext(crate::Ext::STARTTLS) if config.enable_starttls && !is_tls => {
             println!("STARTTLS !");
 
             if let Some(tls_config) = handler.tls_request().await {
@@ -227,7 +247,7 @@ where
                     .await?;
             }
         }
-        Ext(crate::Ext::BDAT(size, last)) => {
+        Ext(crate::Ext::BDAT(size, last)) if config.enable_chunking => {
             let reply = do_bdat(socket, state, handler, size, last).await?;
             socket.send(reply).await?;
         }
@@ -245,14 +265,21 @@ pub type EhloKeywords = BTreeMap<String, Option<String>>;
 async fn do_ehlo<H: Handler>(
     state: &mut State,
     handler: &mut H,
-    domain: DomainPart,
+    config: &Config,
     is_tls: bool,
+    domain: DomainPart,
 ) -> Result<Reply, ServerError> {
     let mut initial_keywords = EhloKeywords::new();
-    for kw in ["PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8", "CHUNKING"].as_ref() {
+    for kw in ["PIPELINING", "ENHANCEDSTATUSCODES"].as_ref() {
         initial_keywords.insert((*kw).into(), None);
     }
-    if !is_tls {
+    if config.enable_smtputf8 {
+        initial_keywords.insert("SMTPUTF8".into(), None);
+    }
+    if config.enable_chunking {
+        initial_keywords.insert("CHUNKING".into(), None);
+    }
+    if config.enable_starttls && !is_tls {
         initial_keywords.insert("STARTTLS".into(), None);
     }
 
@@ -432,14 +459,20 @@ impl From<std::io::Error> for ServerError {
     }
 }
 
-async fn read_command<S>(reader: &mut S) -> Result<Command, ServerError>
+async fn read_command<S>(reader: &mut S, smtputf8: bool) -> Result<Command, ServerError>
 where
     S: Stream<Item = Result<BytesMut, LineError>> + Unpin,
 {
     println!("Waiting for command...");
     let line = reader.next().await.ok_or(ServerError::EOF)??;
 
-    match command::<Intl>(&line) {
+    let parse_res = if smtputf8 {
+        command::<Intl>(&line)
+    } else {
+        command::<Legacy>(&line)
+    };
+
+    match parse_res {
         Err(_) => Err(ServerError::SyntaxError(line)),
         Ok((rem, _)) if !rem.is_empty() => Err(ServerError::SyntaxError(line)),
         Ok((_, cmd)) => Ok(cmd),
