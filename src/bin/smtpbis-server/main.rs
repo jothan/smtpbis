@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
 
 use tokio_rustls::rustls::{
@@ -69,9 +69,6 @@ impl Handler for DummyHandler {
 
     async fn mail(&mut self, path: ReversePath, _params: Vec<Param>) -> HandlerResult {
         println!("Handler MAIL: {:?}", path);
-        if let ReversePath::Null = &path {
-            return Err(None);
-        }
 
         self.mail = Some(path);
         Ok(None)
@@ -159,20 +156,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let (socket, addr) = listener.accept().await?;
-        let handler = DummyHandler {
-            addr,
-            tls_config: tls_config.clone(),
-            helo: None,
-            mail: None,
-            rcpt: Vec::new(),
-            body: Vec::new(),
-        };
+        tokio::spawn(serve_smtp(socket, addr, tls_config.clone()));
+    }
+}
 
-        tokio::spawn(async move {
-            let config = Config::default();
-            if let Err(e) = smtp_server(socket, handler, &config).await {
-                println!("Top level error: {:?}", e);
-            }
-        });
+async fn serve_smtp(socket: TcpStream, addr: SocketAddr, tls_config: Arc<ServerConfig>) {
+    let handler = DummyHandler {
+        addr,
+        tls_config: tls_config,
+        helo: None,
+        mail: None,
+        rcpt: Vec::new(),
+        body: Vec::new(),
+    };
+
+    let config = Config::default();
+    if let Err(e) = smtp_server(socket, handler, &config).await {
+        println!("Top level error: {:?}", e);
     }
 }
