@@ -4,7 +4,7 @@ use std::fmt::Write;
 use async_trait::async_trait;
 use bytes::BytesMut;
 
-use futures_util::future::{select, Either};
+use futures_util::future::{select, Either, FusedFuture};
 use tokio::codec::{Framed, FramedParts};
 use tokio::prelude::*;
 
@@ -18,7 +18,7 @@ use rustyknife::types::{Domain, DomainPart};
 
 pub type HandlerResult = Result<Option<Reply>, Option<Reply>>;
 pub type EhloKeywords = BTreeMap<String, Option<String>>;
-pub type ShutdownSignal = dyn Future<Output = Result<(), ()>> + Send + Unpin;
+pub type ShutdownSignal = dyn FusedFuture<Output = Result<(), ()>> + Send + Unpin;
 
 #[async_trait]
 pub trait Handler {
@@ -80,12 +80,13 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send,
     H: Handler,
 {
+    let terminated = shutdown.is_terminated();
     let mut server = InnerServer {
         handler,
         config,
         state: State::Initial,
         shutdown,
-        shutdown_on_idle: false,
+        shutdown_on_idle: terminated,
     };
 
     let res = server.serve(socket, banner).await;
@@ -193,7 +194,7 @@ where
 
         self.shutdown_check()?;
 
-        let line = if self.shutdown_on_idle {
+        let line = if self.shutdown.is_terminated() {
             reader.next().await
         } else {
             match select(reader.next(), &mut self.shutdown).await {
