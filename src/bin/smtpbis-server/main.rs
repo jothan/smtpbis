@@ -19,12 +19,13 @@ use tokio_rustls::rustls::{
     internal::pemfile::{certs, pkcs8_private_keys},
     NoClientAuth, ServerConfig, ServerSession, Session,
 };
+use tokio_rustls::TlsAcceptor;
 
 use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
 use rustyknife::types::{Domain, DomainPart, Mailbox};
 use smtpbis::{
-    smtp_server, Config, EhloKeywords, Handler, HandlerResult, LineError, Reply, ServerError,
-    ShutdownSignal,
+    smtp_server, Config, EhloKeywords, Handler, HandlerResult, LineError, LoopExit, Reply,
+    ServerError, ShutdownSignal,
 };
 
 const CERT: &[u8] = include_bytes!("ssl-cert-snakeoil.pem");
@@ -41,11 +42,14 @@ struct DummyHandler {
 
 #[async_trait]
 impl Handler for DummyHandler {
-    async fn tls_request(&mut self) -> Option<Arc<ServerConfig>> {
+    type TlsConfig = Arc<ServerConfig>;
+    type TlsSession = ServerSession;
+
+    async fn tls_request(&mut self) -> Option<Self::TlsConfig> {
         Some(self.tls_config.clone())
     }
 
-    async fn tls_started(&mut self, session: &ServerSession) {
+    async fn tls_started(&mut self, session: &Self::TlsSession) {
         println!(
             "TLS started: {:?}/{:?}",
             session.get_protocol_version(),
@@ -193,7 +197,9 @@ async fn listen_loop(mut shutdown: Receiver<()>) {
                 let tls_config = tls_config.clone();
 
                 tokio::spawn(async move {
-                    serve_smtp(socket, addr, tls_config, &mut shutdown_rx).await
+                    serve_smtp(socket, addr, tls_config, &mut shutdown_rx)
+                        .await
+                        .unwrap()
                 })
             }
             Either::Right(..) => {
@@ -206,12 +212,12 @@ async fn listen_loop(mut shutdown: Receiver<()>) {
 }
 
 async fn serve_smtp(
-    socket: TcpStream,
+    mut socket: TcpStream,
     addr: SocketAddr,
     tls_config: Arc<ServerConfig>,
     shutdown: &mut ShutdownSignal,
-) {
-    let handler = DummyHandler {
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut handler = DummyHandler {
         addr,
         tls_config,
         helo: None,
@@ -220,8 +226,22 @@ async fn serve_smtp(
         body: Vec::new(),
     };
 
-    let config = Config::default();
-    if let Err(e) = smtp_server(socket, handler, &config, shutdown).await {
-        println!("Top level error: {:?}", e);
+    let mut config = Config::default();
+    match smtp_server(&mut socket, &mut handler, &config, shutdown, true).await {
+        Ok(LoopExit::Done) => println!("Server done"),
+        Ok(LoopExit::STARTTLS(tls_config)) => {
+            let acceptor = TlsAcceptor::from(tls_config);
+            let mut tls_socket = acceptor.accept(socket).await?;
+            config.enable_starttls = false;
+            handler.tls_started(tls_socket.get_ref().1).await;
+            match smtp_server(&mut tls_socket, &mut handler, &config, shutdown, false).await {
+                Ok(_) => println!("TLS Server done"),
+                Err(e) => println!("Top level error: {:?}", e),
+            }
+            tls_socket.shutdown().await?;
+        }
+        Err(e) => println!("Top level error: {:?}", e),
     }
+
+    Ok(())
 }

@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -8,9 +7,6 @@ use bytes::BytesMut;
 use futures_util::future::{select, Either};
 use tokio::codec::{Framed, FramedParts};
 use tokio::prelude::*;
-
-use tokio_rustls::rustls::{ServerConfig, ServerSession};
-use tokio_rustls::TlsAcceptor;
 
 use crate::{command, Command, Command::Base, Command::*};
 use crate::{LineCodec, LineError, Reply};
@@ -26,8 +22,11 @@ pub type ShutdownSignal = dyn Future<Output = Result<(), ()>> + Send + Unpin;
 
 #[async_trait]
 pub trait Handler {
-    async fn tls_request(&mut self) -> Option<Arc<ServerConfig>>;
-    async fn tls_started(&mut self, session: &ServerSession);
+    type TlsConfig;
+    type TlsSession;
+
+    async fn tls_request(&mut self) -> Option<Self::TlsConfig>;
+    async fn tls_started(&mut self, session: &Self::TlsSession);
 
     async fn ehlo(
         &mut self,
@@ -71,53 +70,32 @@ impl Default for Config {
 }
 
 pub async fn smtp_server<S, H>(
-    mut socket: S,
-    mut handler: H,
+    socket: &mut S,
+    handler: &mut H,
     config: &Config,
     shutdown: &mut ShutdownSignal,
-) -> Result<(), ServerError>
+    banner: bool,
+) -> Result<LoopExit<H>, ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
     H: Handler,
 {
     let mut server = InnerServer {
-        handler: &mut handler,
+        handler,
         config,
         state: State::Initial,
         shutdown,
         shutdown_on_idle: false,
     };
 
-    match server.serve(&mut socket, true, false).await? {
-        LoopExit::Done => println!("Server exited without error"),
-        LoopExit::STARTTLS(tls_config) => {
-            socket.flush().await?;
-            let acceptor = TlsAcceptor::from(tls_config);
-            let mut tls_socket = acceptor.accept(socket).await?;
-
-            server.state = State::Initial;
-            server.handler.tls_started(tls_socket.get_ref().1).await;
-            let tls_res = server.serve(&mut tls_socket, false, true).await;
-            match tls_res {
-                Ok(LoopExit::Done) => println!("TLS server exited without error"),
-                Ok(LoopExit::STARTTLS(..)) => println!("Nested TLS requested"),
-                _ => {}
-            }
-            tls_socket.shutdown().await?;
-            let (s, _) = tls_socket.into_inner();
-            socket = s;
-            tls_res?;
-        }
-    }
+    let res = server.serve(socket, banner).await;
     socket.flush().await?;
-    socket.shutdown().await?;
-
-    Ok(())
+    Ok(res?)
 }
 
-enum LoopExit {
+pub enum LoopExit<H: Handler> {
     Done,
-    STARTTLS(Arc<ServerConfig>),
+    STARTTLS(H::TlsConfig),
 }
 
 #[derive(Debug, PartialEq)]
@@ -145,13 +123,10 @@ where
         &mut self,
         base_socket: &mut S,
         banner: bool,
-        is_tls: bool,
-    ) -> Result<LoopExit, ServerError>
+    ) -> Result<LoopExit<H>, ServerError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        println!("connected, TLS:{:?} !", is_tls);
-
         let mut socket = Framed::new(base_socket, LineCodec::default());
 
         if banner {
@@ -177,7 +152,7 @@ where
             };
             println!("command: {:?}", cmd);
 
-            match self.dispatch_command(&mut socket, cmd, is_tls).await? {
+            match self.dispatch_command(&mut socket, cmd).await? {
                 Some(LoopExit::STARTTLS(tls_config)) => {
                     socket.flush().await?;
                     let FramedParts { io, read_buf, .. } = socket.into_parts();
@@ -249,14 +224,13 @@ where
         &mut self,
         socket: &mut Framed<&mut S, LineCodec>,
         command: Command,
-        is_tls: bool,
-    ) -> Result<Option<LoopExit>, ServerError>
+    ) -> Result<Option<LoopExit<H>>, ServerError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
         match command {
             Base(EHLO(domain)) => {
-                socket.send(self.do_ehlo(is_tls, domain).await?).await?;
+                socket.send(self.do_ehlo(domain).await?).await?;
             }
             Base(HELO(domain)) => {
                 socket.send(self.do_helo(domain).await?).await?;
@@ -280,7 +254,7 @@ where
                 self.handler.rset().await;
                 socket.send(Reply::new(250, None, "ok")).await?;
             }
-            Ext(crate::Ext::STARTTLS) if self.config.enable_starttls && !is_tls => {
+            Ext(crate::Ext::STARTTLS) if self.config.enable_starttls => {
                 println!("STARTTLS !");
 
                 if let Some(tls_config) = self.handler.tls_request().await {
@@ -304,7 +278,7 @@ where
         Ok(None)
     }
 
-    async fn do_ehlo(&mut self, is_tls: bool, domain: DomainPart) -> Result<Reply, ServerError> {
+    async fn do_ehlo(&mut self, domain: DomainPart) -> Result<Reply, ServerError> {
         let mut initial_keywords = EhloKeywords::new();
         for kw in ["PIPELINING", "ENHANCEDSTATUSCODES"].as_ref() {
             initial_keywords.insert((*kw).into(), None);
@@ -315,7 +289,7 @@ where
         if self.config.enable_chunking {
             initial_keywords.insert("CHUNKING".into(), None);
         }
-        if self.config.enable_starttls && !is_tls {
+        if self.config.enable_starttls {
             initial_keywords.insert("STARTTLS".into(), None);
         }
 
