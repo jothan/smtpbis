@@ -6,8 +6,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use tokio::net::{TcpListener, TcpStream};
+
+use futures_util::future::{select, Either};
+use futures_util::pin_mut;
+use futures_util::try_future::TryFutureExt;
+use tokio::net::{signal, TcpListener, TcpStream};
 use tokio::prelude::*;
+use tokio::runtime::Runtime;
+use tokio::sync::oneshot::Receiver;
 
 use tokio_rustls::rustls::{
     internal::pemfile::{certs, pkcs8_private_keys},
@@ -18,6 +24,7 @@ use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
 use rustyknife::types::{Domain, DomainPart, Mailbox};
 use smtpbis::{
     smtp_server, Config, EhloKeywords, Handler, HandlerResult, LineError, Reply, ServerError,
+    ShutdownSignal,
 };
 
 const CERT: &[u8] = include_bytes!("ssl-cert-snakeoil.pem");
@@ -146,27 +153,67 @@ impl DummyHandler {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "127.0.0.1:8080".parse().unwrap();
-    let mut listener = TcpListener::bind(&addr).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rt = Runtime::new()?;
+
+    rt.block_on(async {
+        let (listen_shutdown_tx, listen_shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(listen_loop(listen_shutdown_rx));
+
+        let mut ctrl_c = signal::ctrl_c().unwrap();
+        ctrl_c.next().await;
+        listen_shutdown_tx.send(()).unwrap();
+        println!("Waiting for tasks to finish...");
+    });
+
+    rt.shutdown_on_idle();
+
+    Ok(())
+}
+
+async fn listen_loop(mut shutdown: Receiver<()>) {
+    let mut listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
     let mut tls_config = ServerConfig::new(NoClientAuth::new());
     let certs = certs(&mut Cursor::new(CERT)).unwrap();
     let key = pkcs8_private_keys(&mut Cursor::new(KEY)).unwrap().remove(0);
     tls_config.set_single_cert(certs, key).unwrap();
     let tls_config = Arc::new(tls_config);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown_rx = shutdown_rx.map_err(|_| ()).shared();
 
     loop {
-        let (socket, addr) = listener.accept().await?;
-        tokio::spawn(serve_smtp(socket, addr, tls_config.clone()));
+        let accept = listener.accept();
+        pin_mut!(accept);
+
+        match select(accept, &mut shutdown).await {
+            Either::Left((listen_res, _)) => {
+                let (socket, addr) = listen_res.unwrap();
+                let mut shutdown_rx = shutdown_rx.clone();
+                let tls_config = tls_config.clone();
+
+                tokio::spawn(async move {
+                    serve_smtp(socket, addr, tls_config, &mut shutdown_rx).await
+                })
+            }
+            Either::Right(..) => {
+                println!("socket listening loop stopping");
+                shutdown_tx.send(()).unwrap();
+                break;
+            }
+        };
     }
 }
 
-async fn serve_smtp(socket: TcpStream, addr: SocketAddr, tls_config: Arc<ServerConfig>) {
+async fn serve_smtp(
+    socket: TcpStream,
+    addr: SocketAddr,
+    tls_config: Arc<ServerConfig>,
+    shutdown: &mut ShutdownSignal,
+) {
     let handler = DummyHandler {
         addr,
-        tls_config: tls_config,
+        tls_config,
         helo: None,
         mail: None,
         rcpt: Vec::new(),
@@ -174,7 +221,7 @@ async fn serve_smtp(socket: TcpStream, addr: SocketAddr, tls_config: Arc<ServerC
     };
 
     let config = Config::default();
-    if let Err(e) = smtp_server(socket, handler, &config).await {
+    if let Err(e) = smtp_server(socket, handler, &config, shutdown).await {
         println!("Top level error: {:?}", e);
     }
 }

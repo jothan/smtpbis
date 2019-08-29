@@ -8,7 +8,7 @@ categories = ["email", "network-programming"]
 
 [dependencies]
 rustyknife = {git="https://github.com/zerospam/rustyknife.git", rev="master", default_features=false, features=["quoted-string-rfc2047"]}
-tokio = "=0.2.0-alpha.2"
+tokio = {version="=0.2.0-alpha.3", features=["signal"]}
 bytes = "0.4.12"
 futures-util-preview = "0.3.0-alpha.18"
 tokio-rustls = "0.12.0-alpha.1"

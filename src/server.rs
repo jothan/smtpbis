@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
+
+use futures_util::future::{select, Either};
 use tokio::codec::{Framed, FramedParts};
 use tokio::net::TcpStream;
 use tokio::prelude::*;
@@ -21,6 +23,7 @@ use rustyknife::types::{Domain, DomainPart};
 
 pub type HandlerResult = Result<Option<Reply>, Option<Reply>>;
 pub type EhloKeywords = BTreeMap<String, Option<String>>;
+pub type ShutdownSignal = dyn Future<Output = Result<(), ()>> + Send + Unpin;
 
 #[async_trait]
 pub trait Handler {
@@ -94,7 +97,8 @@ pub async fn smtp_server<S, H>(
     mut socket: S,
     mut handler: H,
     config: &Config,
-) -> Result<S, ServerError>
+    shutdown: &mut ShutdownSignal,
+) -> Result<(), ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
     H: Handler,
@@ -103,6 +107,8 @@ where
         handler: &mut handler,
         config,
         state: State::Initial,
+        shutdown,
+        shutdown_on_idle: false,
     };
 
     match server.serve(&mut socket, true).await? {
@@ -113,17 +119,22 @@ where
             let mut tls_socket = acceptor.accept(socket).await?;
 
             server.state = State::Initial;
-            match server.serve(&mut tls_socket, false).await? {
-                LoopExit::Done => println!("TLS server exited without error"),
-                LoopExit::STARTTLS(..) => println!("Nested TLS requested"),
+            let tls_res = server.serve(&mut tls_socket, false).await;
+            match tls_res {
+                Ok(LoopExit::Done) => println!("TLS server exited without error"),
+                Ok(LoopExit::STARTTLS(..)) => println!("Nested TLS requested"),
+                _ => {}
             }
             tls_socket.shutdown().await?;
             let (s, _) = tls_socket.into_inner();
             socket = s;
+            tls_res?;
         }
     }
+    socket.flush().await?;
+    socket.shutdown().await?;
 
-    Ok(socket)
+    Ok(())
 }
 
 enum LoopExit {
@@ -144,6 +155,8 @@ struct InnerServer<'a, H> {
     handler: &'a mut H,
     config: &'a Config,
     state: State,
+    shutdown: &'a mut ShutdownSignal,
+    shutdown_on_idle: bool,
 }
 
 impl<'a, H> InnerServer<'a, H>
@@ -171,13 +184,17 @@ where
         }
 
         loop {
-            let cmd = match read_command(&mut socket, self.config.enable_smtputf8).await {
+            let cmd = match self.read_command(&mut socket).await {
                 Ok(cmd) => cmd,
                 Err(ServerError::SyntaxError(_)) => {
                     socket
                         .send(Reply::new(500, None, "Invalid command syntax"))
                         .await?;
                     continue;
+                }
+                Err(ServerError::Shutdown) => {
+                    socket.send(Reply::new(421, None, "Shutting down")).await?;
+                    return Ok(LoopExit::Done);
                 }
                 Err(e) => return Err(e),
             };
@@ -204,6 +221,50 @@ where
             }
 
             println!("State: {:?}\n", self.state);
+        }
+    }
+
+    fn shutdown_check(&self) -> Result<(), ServerError> {
+        match (self.shutdown_on_idle, &self.state) {
+            (true, State::Initial) | (true, State::BDATFAIL) => Err(ServerError::Shutdown),
+            _ => Ok(()),
+        }
+    }
+
+    async fn read_command<S>(&mut self, reader: &mut S) -> Result<Command, ServerError>
+    where
+        S: Stream<Item = Result<BytesMut, LineError>> + Unpin,
+        S: Sink<Reply>,
+        ServerError: From<<S as Sink<Reply>>::Error>,
+    {
+        println!("Waiting for command...");
+
+        self.shutdown_check()?;
+
+        let line = if self.shutdown_on_idle {
+            reader.next().await
+        } else {
+            match select(reader.next(), &mut self.shutdown).await {
+                Either::Left((cmd, _)) => cmd,
+                Either::Right((_, cmd_fut)) => {
+                    self.shutdown_on_idle = true;
+                    self.shutdown_check()?;
+                    cmd_fut.await
+                }
+            }
+        }
+        .ok_or(ServerError::EOF)??;
+
+        let parse_res = if self.config.enable_smtputf8 {
+            command::<Intl>(&line)
+        } else {
+            command::<Legacy>(&line)
+        };
+
+        match parse_res {
+            Err(_) => Err(ServerError::SyntaxError(line)),
+            Ok((rem, _)) if !rem.is_empty() => Err(ServerError::SyntaxError(line)),
+            Ok((_, cmd)) => Ok(cmd),
         }
     }
 
@@ -438,6 +499,7 @@ pub enum ServerError {
     IO(std::io::Error),
     Pipelining,
     DataAbort,
+    Shutdown,
 }
 
 impl From<LineError> for ServerError {
@@ -452,26 +514,6 @@ impl From<LineError> for ServerError {
 impl From<std::io::Error> for ServerError {
     fn from(err: std::io::Error) -> Self {
         Self::IO(err)
-    }
-}
-
-async fn read_command<S>(reader: &mut S, smtputf8: bool) -> Result<Command, ServerError>
-where
-    S: Stream<Item = Result<BytesMut, LineError>> + Unpin,
-{
-    println!("Waiting for command...");
-    let line = reader.next().await.ok_or(ServerError::EOF)??;
-
-    let parse_res = if smtputf8 {
-        command::<Intl>(&line)
-    } else {
-        command::<Legacy>(&line)
-    };
-
-    match parse_res {
-        Err(_) => Err(ServerError::SyntaxError(line)),
-        Ok((rem, _)) if !rem.is_empty() => Err(ServerError::SyntaxError(line)),
-        Ok((_, cmd)) => Ok(cmd),
     }
 }
 
