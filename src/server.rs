@@ -7,11 +7,10 @@ use bytes::BytesMut;
 
 use futures_util::future::{select, Either};
 use tokio::codec::{Framed, FramedParts};
-use tokio::net::TcpStream;
 use tokio::prelude::*;
 
 use tokio_rustls::rustls::{ServerConfig, ServerSession};
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_rustls::TlsAcceptor;
 
 use crate::{command, Command, Command::Base, Command::*};
 use crate::{LineCodec, LineError, Reply};
@@ -71,28 +70,6 @@ impl Default for Config {
     }
 }
 
-pub trait MaybeTLS {
-    fn tls_session(&self) -> Option<&ServerSession> {
-        None
-    }
-}
-
-impl MaybeTLS for TcpStream {}
-impl MaybeTLS for &TcpStream {}
-impl MaybeTLS for &mut TcpStream {}
-
-impl<T> MaybeTLS for TlsStream<T> {
-    fn tls_session(&self) -> Option<&ServerSession> {
-        Some(self.get_ref().1)
-    }
-}
-
-impl<T> MaybeTLS for &mut TlsStream<T> {
-    fn tls_session(&self) -> Option<&ServerSession> {
-        Some(self.get_ref().1)
-    }
-}
-
 pub async fn smtp_server<S, H>(
     mut socket: S,
     mut handler: H,
@@ -100,7 +77,7 @@ pub async fn smtp_server<S, H>(
     shutdown: &mut ShutdownSignal,
 ) -> Result<(), ServerError>
 where
-    S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
     H: Handler,
 {
     let mut server = InnerServer {
@@ -111,7 +88,7 @@ where
         shutdown_on_idle: false,
     };
 
-    match server.serve(&mut socket, true).await? {
+    match server.serve(&mut socket, true, false).await? {
         LoopExit::Done => println!("Server exited without error"),
         LoopExit::STARTTLS(tls_config) => {
             socket.flush().await?;
@@ -119,7 +96,8 @@ where
             let mut tls_socket = acceptor.accept(socket).await?;
 
             server.state = State::Initial;
-            let tls_res = server.serve(&mut tls_socket, false).await;
+            server.handler.tls_started(tls_socket.get_ref().1).await;
+            let tls_res = server.serve(&mut tls_socket, false, true).await;
             match tls_res {
                 Ok(LoopExit::Done) => println!("TLS server exited without error"),
                 Ok(LoopExit::STARTTLS(..)) => println!("Nested TLS requested"),
@@ -163,17 +141,16 @@ impl<'a, H> InnerServer<'a, H>
 where
     H: Handler,
 {
-    async fn serve<S>(&mut self, base_socket: &mut S, banner: bool) -> Result<LoopExit, ServerError>
+    async fn serve<S>(
+        &mut self,
+        base_socket: &mut S,
+        banner: bool,
+        is_tls: bool,
+    ) -> Result<LoopExit, ServerError>
     where
-        S: AsyncRead + AsyncWrite + Unpin + MaybeTLS + Send,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        let tls_session = base_socket.tls_session();
-        if let Some(session) = &tls_session {
-            self.handler.tls_started(session).await;
-        }
-        let tls_session = tls_session.is_some();
-
-        println!("connected, TLS:{:?} !", tls_session);
+        println!("connected, TLS:{:?} !", is_tls);
 
         let mut socket = Framed::new(base_socket, LineCodec::default());
 
@@ -200,7 +177,7 @@ where
             };
             println!("command: {:?}", cmd);
 
-            match self.dispatch_command(&mut socket, cmd).await? {
+            match self.dispatch_command(&mut socket, cmd, is_tls).await? {
                 Some(LoopExit::STARTTLS(tls_config)) => {
                     socket.flush().await?;
                     let FramedParts { io, read_buf, .. } = socket.into_parts();
@@ -272,12 +249,11 @@ where
         &mut self,
         socket: &mut Framed<&mut S, LineCodec>,
         command: Command,
+        is_tls: bool,
     ) -> Result<Option<LoopExit>, ServerError>
     where
-        S: AsyncRead + AsyncWrite + MaybeTLS + Unpin + Send,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        let is_tls = socket.get_ref().tls_session().is_some();
-
         match command {
             Base(EHLO(domain)) => {
                 socket.send(self.do_ehlo(is_tls, domain).await?).await?;
