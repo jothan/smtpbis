@@ -1,8 +1,6 @@
 # smtpbis
 
 [![crates.io](http://meritbadge.herokuapp.com/smtpbis)](https://crates.io/crates/smtpbis)
-[rustyknife](https://crates.io/crates/rustyknife)
-[tokio](https://tokio.rs/)
 
 Extensible SMTP server library
 
@@ -16,3 +14,6 @@ Features:
 * SMTPUTF8 support
 * CHUNKING support
 * Pluggable STARTTLS support
+
+[rustyknife]: https://crates.io/crates/rustyknife
+[tokio]: https://tokio.rs/
