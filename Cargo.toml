@@ -6,6 +6,7 @@ edition = "2018"
 description = "Asynchronous ESMTP service library."
 license = "GPL-3.0+"
 categories = ["email", "network-programming"]
+readme = "README.md"
 
 [dependencies]
 rustyknife = {git="https://github.com/zerospam/rustyknife.git", rev="master", default_features=false, features=["quoted-string-rfc2047"]}
