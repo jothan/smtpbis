@@ -7,6 +7,8 @@ description = "Asynchronous ESMTP service library."
 license = "GPL-3.0+"
 categories = ["email", "network-programming"]
 readme = "README.md"
+homepage = "https://github.com/zerospam/smtpbis"
+repository = "https://github.com/zerospam/smtpbis.git"
 
 [dependencies]
 rustyknife = {version="0.2", features=["quoted-string-rfc2047"]}
