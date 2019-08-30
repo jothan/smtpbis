@@ -369,11 +369,7 @@ where
         ServerError: From<<S as Sink<Reply>>::Error>,
     {
         Ok(match self.state {
-            State::RCPT => match self.handler.data_start().await.with_default(Reply::new(
-                354,
-                None,
-                "send data",
-            )) {
+            State::RCPT => match self.handler.data_start().await.with_default(Reply::data_ok()) {
                 Ok(reply) => {
                     socket.send(reply).await?;
 
@@ -388,7 +384,7 @@ where
                         drop(body_stream);
                         // The handler MUST signal an error.
                         if !reply.is_error() {
-                            reply = Reply::new(450, None, "data abort");
+                            reply = Reply::data_abort();
                         }
 
                         socket.send(reply).await?;
@@ -436,7 +432,7 @@ where
                     drop(body_stream);
                     // The handler MUST signal an error.
                     if !reply.is_error() {
-                        reply = Reply::new(450, None, "data abort");
+                        reply = Reply::data_abort();
                     }
 
                     socket.send(reply).await?;

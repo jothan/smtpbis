@@ -52,6 +52,16 @@ impl Reply {
         Self::new(502, None, "Command not implemented")
     }
 
+    pub fn data_ok() -> Self {
+        Self::new(354, None, "OK, send data")
+    }
+
+    /// Used when we cannot read all mail data, such as with an
+    /// oversized message.
+    pub fn data_abort() -> Self {
+        Self::new(450, None, "Data abort")
+    }
+
     pub fn is_error(&self) -> bool {
         match ReplyCategory::from(self) {
             ReplyCategory::TempError | ReplyCategory::PermError => true,
