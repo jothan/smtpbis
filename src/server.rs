@@ -279,6 +279,7 @@ where
             initial_keywords.insert((*kw).into(), None);
         }
         if self.config.enable_smtputf8 {
+            initial_keywords.insert("8BITMIME".into(), None);
             initial_keywords.insert("SMTPUTF8".into(), None);
         }
         if self.config.enable_chunking {
