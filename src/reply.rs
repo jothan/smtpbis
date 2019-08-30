@@ -27,6 +27,30 @@ impl Reply {
     ) -> Self {
         Self::new_checked(code, ecode, text).expect("Invalid code or CR in reply text.")
     }
+
+    pub fn ok() -> Self {
+        Self::new(250, None, "OK")
+    }
+
+    pub fn bad_sequence() -> Self {
+        Self::new(503, None, "Bad sequence of commands")
+    }
+
+    pub fn no_mail_transaction() -> Self {
+        Self::new(503, None, "No mail transaction in progress")
+    }
+
+    pub fn no_valid_recipients() -> Self {
+        Self::new(554, None, "No valid recipients")
+    }
+
+    pub fn syntax_error() -> Self {
+        Self::new(500, None, "Syntax error")
+    }
+
+    pub fn not_implemented() -> Self {
+        Self::new(502, None, "Command not implemented")
+    }
 }
 
 impl Display for Reply {

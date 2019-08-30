@@ -141,7 +141,7 @@ where
                 Ok(cmd) => cmd,
                 Err(ServerError::SyntaxError(_)) => {
                     socket
-                        .send(Reply::new(500, None, "Invalid command syntax"))
+                        .send(Reply::syntax_error())
                         .await?;
                     continue;
                 }
@@ -253,7 +253,7 @@ where
             Base(RSET) => {
                 self.state = State::Initial;
                 self.handler.rset().await;
-                socket.send(Reply::new(250, None, "ok")).await?;
+                socket.send(Reply::ok()).await?;
             }
             Ext(crate::Ext::STARTTLS) if self.config.enable_starttls => {
                 println!("STARTTLS !");
@@ -262,7 +262,7 @@ where
                     return Ok(Some(LoopExit::STARTTLS(tls_config)));
                 } else {
                     socket
-                        .send(Reply::new(502, None, "command not implemented"))
+                        .send(Reply::not_implemented())
                         .await?;
                 }
             }
@@ -272,7 +272,7 @@ where
             }
             _ => {
                 socket
-                    .send(Reply::new(502, None, "command not implemented"))
+                    .send(Reply::not_implemented())
                     .await?;
             }
         }
@@ -316,7 +316,7 @@ where
         Ok(match self.handler.helo(domain).await {
             Ok(reply) => {
                 self.state = State::Initial;
-                reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
+                reply.unwrap_or_else(Reply::ok)
             }
             Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "refused")),
         })
@@ -331,13 +331,13 @@ where
             State::Initial => match self.handler.mail(path, params).await {
                 Ok(reply) => {
                     self.state = State::MAIL;
-                    reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
+                    reply.unwrap_or_else(Reply::ok)
                 }
                 Err(reply) => {
                     reply.unwrap_or_else(|| Reply::new(550, None, "mail transaction refused"))
                 }
             },
-            _ => Reply::new(503, None, "bad sequence of commands"),
+            _ => Reply::bad_sequence(),
         })
     }
 
@@ -350,13 +350,13 @@ where
             State::MAIL | State::RCPT => match self.handler.rcpt(path, params).await {
                 Ok(reply) => {
                     self.state = State::RCPT;
-                    reply.unwrap_or_else(|| Reply::new(250, None, "ok"))
+                    reply.unwrap_or_else(Reply::ok)
                 }
                 Err(reply) => {
                     reply.unwrap_or_else(|| Reply::new(550, None, "recipient not accepted"))
                 }
             },
-            _ => Reply::new(503, None, "bad sequence of commands"),
+            _ => Reply::bad_sequence(),
         })
     }
 
@@ -386,12 +386,12 @@ where
                     }
 
                     self.state = State::Initial;
-                    reply.unwrap_or_else(|| Reply::new(250, None, "body ok"))
+                    reply.unwrap_or_else(Reply::ok)
                 }
                 Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "data not accepted")),
             },
-            State::Initial => Reply::new(503, None, "mail transaction not started"),
-            State::MAIL => Reply::new(503, None, "must have at least one valid recipient"),
+            State::Initial => Reply::no_mail_transaction(),
+            State::MAIL => Reply::no_valid_recipients(),
             State::BDAT | State::BDATFAIL => {
                 Reply::new(503, None, "BDAT may not be mixed with DATA")
             }
@@ -434,10 +434,10 @@ where
                 }
 
                 self.state = if last { State::Initial } else { State::BDAT };
-                reply.unwrap_or_else(|| Reply::new(250, None, "data ok"))
+                reply.unwrap_or_else(Reply::ok)
             }
-            State::MAIL => Reply::new(503, None, "must have at least one valid recipient"),
-            _ => Reply::new(503, None, "mail transaction not started"),
+            State::MAIL => Reply::no_valid_recipients(),
+            _ => Reply::no_mail_transaction(),
         })
     }
 }
