@@ -8,6 +8,7 @@ use futures_util::future::{select, Either, FusedFuture};
 use tokio::codec::{Framed, FramedParts};
 use tokio::prelude::*;
 
+use crate::reply::ReplyDefault;
 use crate::{command, Command, Command::Base, Command::*};
 use crate::{LineCodec, LineError, Reply};
 
@@ -16,7 +17,6 @@ use rustyknife::rfc5321::Command::*;
 use rustyknife::rfc5321::{ForwardPath, Param, ReversePath};
 use rustyknife::types::{Domain, DomainPart};
 
-pub type HandlerResult = Result<Option<Reply>, Option<Reply>>;
 pub type EhloKeywords = BTreeMap<String, Option<String>>;
 pub type ShutdownSignal = dyn FusedFuture<Output = Result<(), ()>> + Send + Unpin;
 
@@ -33,13 +33,13 @@ pub trait Handler {
         domain: DomainPart,
         initial_keywords: EhloKeywords,
     ) -> Result<(String, EhloKeywords), Reply>;
-    async fn helo(&mut self, domain: Domain) -> HandlerResult;
+    async fn helo(&mut self, domain: Domain) -> Option<Reply>;
     async fn rset(&mut self);
 
-    async fn mail(&mut self, path: ReversePath, params: Vec<Param>) -> HandlerResult;
-    async fn rcpt(&mut self, path: ForwardPath, params: Vec<Param>) -> HandlerResult;
+    async fn mail(&mut self, path: ReversePath, params: Vec<Param>) -> Option<Reply>;
+    async fn rcpt(&mut self, path: ForwardPath, params: Vec<Param>) -> Option<Reply>;
 
-    async fn data_start(&mut self) -> HandlerResult;
+    async fn data_start(&mut self) -> Option<Reply>;
     async fn data<S>(&mut self, stream: &mut S) -> Result<Option<Reply>, ServerError>
     where
         S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send;
@@ -140,9 +140,7 @@ where
             let cmd = match self.read_command(&mut socket).await {
                 Ok(cmd) => cmd,
                 Err(ServerError::SyntaxError(_)) => {
-                    socket
-                        .send(Reply::syntax_error())
-                        .await?;
+                    socket.send(Reply::syntax_error()).await?;
                     continue;
                 }
                 Err(ServerError::Shutdown) => {
@@ -261,9 +259,7 @@ where
                 if let Some(tls_config) = self.handler.tls_request().await {
                     return Ok(Some(LoopExit::STARTTLS(tls_config)));
                 } else {
-                    socket
-                        .send(Reply::not_implemented())
-                        .await?;
+                    socket.send(Reply::not_implemented()).await?;
                 }
             }
             Ext(crate::Ext::BDAT(size, last)) if self.config.enable_chunking => {
@@ -271,9 +267,7 @@ where
                 socket.send(reply).await?;
             }
             _ => {
-                socket
-                    .send(Reply::not_implemented())
-                    .await?;
+                socket.send(Reply::not_implemented()).await?;
             }
         }
         Ok(None)
@@ -313,13 +307,15 @@ where
     }
 
     async fn do_helo(&mut self, domain: Domain) -> Result<Reply, ServerError> {
-        Ok(match self.handler.helo(domain).await {
-            Ok(reply) => {
-                self.state = State::Initial;
-                reply.unwrap_or_else(Reply::ok)
-            }
-            Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "refused")),
-        })
+        Ok(
+            match self.handler.helo(domain).await.with_default(Reply::ok()) {
+                Ok(reply) => {
+                    self.state = State::Initial;
+                    reply
+                }
+                Err(reply) => reply,
+            },
+        )
     }
 
     async fn do_mail(
@@ -328,14 +324,17 @@ where
         params: Vec<Param>,
     ) -> Result<Reply, ServerError> {
         Ok(match self.state {
-            State::Initial => match self.handler.mail(path, params).await {
+            State::Initial => match self
+                .handler
+                .mail(path, params)
+                .await
+                .with_default(Reply::ok())
+            {
                 Ok(reply) => {
                     self.state = State::MAIL;
-                    reply.unwrap_or_else(Reply::ok)
+                    reply
                 }
-                Err(reply) => {
-                    reply.unwrap_or_else(|| Reply::new(550, None, "mail transaction refused"))
-                }
+                Err(reply) => reply,
             },
             _ => Reply::bad_sequence(),
         })
@@ -347,14 +346,17 @@ where
         params: Vec<Param>,
     ) -> Result<Reply, ServerError> {
         Ok(match self.state {
-            State::MAIL | State::RCPT => match self.handler.rcpt(path, params).await {
+            State::MAIL | State::RCPT => match self
+                .handler
+                .rcpt(path, params)
+                .await
+                .with_default(Reply::ok())
+            {
                 Ok(reply) => {
                     self.state = State::RCPT;
-                    reply.unwrap_or_else(Reply::ok)
+                    reply
                 }
-                Err(reply) => {
-                    reply.unwrap_or_else(|| Reply::new(550, None, "recipient not accepted"))
-                }
+                Err(reply) => reply,
             },
             _ => Reply::bad_sequence(),
         })
@@ -367,28 +369,37 @@ where
         ServerError: From<<S as Sink<Reply>>::Error>,
     {
         Ok(match self.state {
-            State::RCPT => match self.handler.data_start().await {
+            State::RCPT => match self.handler.data_start().await.with_default(Reply::new(
+                354,
+                None,
+                "send data",
+            )) {
                 Ok(reply) => {
-                    socket
-                        .send(reply.unwrap_or_else(|| Reply::new(354, None, "send data")))
-                        .await?;
+                    socket.send(reply).await?;
 
                     let mut body_stream = read_body_data(socket).fuse();
-                    let reply = self.handler.data(&mut body_stream).await?;
+                    let mut reply = self
+                        .handler
+                        .data(&mut body_stream)
+                        .await?
+                        .unwrap_or(Reply::ok());
 
                     if !body_stream.is_done() {
                         drop(body_stream);
-                        socket
-                            .send(reply.unwrap_or_else(|| Reply::new(550, None, "data abort")))
-                            .await?;
+                        // The handler MUST signal an error.
+                        if !reply.is_error() {
+                            reply = Reply::new(450, None, "data abort");
+                        }
+
+                        socket.send(reply).await?;
 
                         return Err(ServerError::DataAbort);
                     }
 
                     self.state = State::Initial;
-                    reply.unwrap_or_else(Reply::ok)
+                    reply
                 }
-                Err(reply) => reply.unwrap_or_else(|| Reply::new(550, None, "data not accepted")),
+                Err(reply) => reply,
             },
             State::Initial => Reply::no_mail_transaction(),
             State::MAIL => Reply::no_valid_recipients(),
@@ -417,24 +428,36 @@ where
                 let reply = self
                     .handler
                     .bdat(&mut body_stream, chunk_size, last)
-                    .await
-                    .map_err(|e| {
-                        self.state = State::BDATFAIL;
-                        e
-                    })?;
+                    .await?;
 
                 if !body_stream.is_done() {
-                    drop(body_stream);
-                    socket
-                        .send(reply.unwrap_or_else(|| Reply::new(550, None, "data abort")))
-                        .await?;
+                    let mut reply = reply.unwrap_or(Reply::ok());
 
-                    self.state = State::BDATFAIL;
+                    drop(body_stream);
+                    // The handler MUST signal an error.
+                    if !reply.is_error() {
+                        reply = Reply::new(450, None, "data abort");
+                    }
+
+                    socket.send(reply).await?;
+
                     return Err(ServerError::DataAbort);
                 }
 
-                self.state = if last { State::Initial } else { State::BDAT };
-                reply.unwrap_or_else(Reply::ok)
+                match reply.with_default(Reply::ok()) {
+                    Ok(reply) => {
+                        if last {
+                            self.state = State::Initial
+                        } else {
+                            self.state = State::BDAT
+                        }
+                        reply
+                    }
+                    Err(reply) => {
+                        self.state = State::BDATFAIL;
+                        reply
+                    }
+                }
             }
             State::MAIL => Reply::no_valid_recipients(),
             _ => Reply::no_mail_transaction(),

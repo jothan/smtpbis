@@ -51,6 +51,53 @@ impl Reply {
     pub fn not_implemented() -> Self {
         Self::new(502, None, "Command not implemented")
     }
+
+    pub fn is_error(&self) -> bool {
+        match ReplyCategory::from(self) {
+            ReplyCategory::TempError | ReplyCategory::PermError => true,
+            _ => false,
+        }
+    }
+}
+
+pub(crate) trait ReplyDefault {
+    fn with_default(self, default: Reply) -> Result<Reply, Reply>;
+}
+
+impl ReplyDefault for Option<Reply> {
+    fn with_default(self, default: Reply) -> Result<Reply, Reply> {
+        let expected_category = ReplyCategory::from(&default);
+        let reply = self.unwrap_or(default);
+        let category = ReplyCategory::from(&reply);
+
+        if category == expected_category {
+            Ok(reply)
+        } else {
+            Err(reply)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReplyCategory {
+    Success,
+    Intermediate,
+    TempError,
+    PermError,
+}
+
+impl From<&Reply> for ReplyCategory {
+    fn from(input: &Reply) -> Self {
+        // Caveat: 552 on reply to RCPT is considered temporary.
+
+        match input.code {
+            200..=299 => Self::Success,
+            300..=399 => Self::Intermediate,
+            400..=499 => Self::TempError,
+            500..=599 => Self::PermError,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl Display for Reply {

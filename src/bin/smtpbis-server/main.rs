@@ -24,8 +24,8 @@ use tokio_rustls::TlsAcceptor;
 use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
 use rustyknife::types::{Domain, DomainPart, Mailbox};
 use smtpbis::{
-    smtp_server, Config, EhloKeywords, Handler, HandlerResult, LineError, LoopExit, Reply,
-    ServerError, ShutdownSignal,
+    smtp_server, Config, EhloKeywords, Handler, LineError, LoopExit, Reply, ServerError,
+    ShutdownSignal,
 };
 
 const CERT: &[u8] = include_bytes!("ssl-cert-snakeoil.pem");
@@ -74,34 +74,34 @@ impl Handler for DummyHandler {
         Ok((greet, initial_keywords))
     }
 
-    async fn helo(&mut self, domain: Domain) -> HandlerResult {
+    async fn helo(&mut self, domain: Domain) -> Option<Reply> {
         self.helo = Some(DomainPart::Domain(domain));
         self.reset_tx();
 
-        Ok(None)
+        None
     }
 
-    async fn mail(&mut self, path: ReversePath, _params: Vec<Param>) -> HandlerResult {
+    async fn mail(&mut self, path: ReversePath, _params: Vec<Param>) -> Option<Reply> {
         println!("Handler MAIL: {:?}", path);
 
         self.mail = Some(path);
-        Ok(None)
+        None
     }
 
-    async fn rcpt(&mut self, path: ForwardPath, _params: Vec<Param>) -> HandlerResult {
+    async fn rcpt(&mut self, path: ForwardPath, _params: Vec<Param>) -> Option<Reply> {
         println!("Handler RCPT: {:?}", path);
         if let ForwardPath::Path(Path(Mailbox(_, DomainPart::Domain(domain)), _)) = &path {
             if domain.starts_with('z') {
-                return Err(None);
+                return Some(Reply::new(550, None, "I don't like zeds"));
             }
         };
         self.rcpt.push(path);
-        Ok(None)
+        None
     }
 
-    async fn data_start(&mut self) -> HandlerResult {
+    async fn data_start(&mut self) -> Option<Reply> {
         println!("Handler DATA start");
-        Ok(None)
+        None
     }
 
     async fn data<S>(&mut self, stream: &mut S) -> Result<Option<Reply>, ServerError>
