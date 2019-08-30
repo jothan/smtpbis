@@ -197,9 +197,8 @@ async fn listen_loop(mut shutdown: Receiver<()>) {
                 let tls_config = tls_config.clone();
 
                 tokio::spawn(async move {
-                    serve_smtp(socket, addr, tls_config, &mut shutdown_rx)
-                        .await
-                        .unwrap()
+                    let smtp_res = serve_smtp(socket, addr, tls_config, &mut shutdown_rx).await;
+                    println!("SMTP task done: {:?}", smtp_res);
                 })
             }
             Either::Right(..) => {
@@ -236,7 +235,7 @@ async fn serve_smtp(
             handler.tls_started(tls_socket.get_ref().1).await;
             match smtp_server(&mut tls_socket, &mut handler, &config, shutdown, false).await {
                 Ok(_) => println!("TLS Server done"),
-                Err(e) => println!("Top level error: {:?}", e),
+                Err(e) => println!("TLS Top level error: {:?}", e),
             }
             tls_socket.shutdown().await?;
         }
