@@ -59,6 +59,10 @@ where
     ) -> Result<Option<Reply>, ServerError>
     where
         S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send;
+
+    async fn unhandled_command(&mut self, _command: Command) -> Option<Reply> {
+        None
+    }
 }
 
 pub struct Config {
@@ -275,7 +279,12 @@ where
                 socket.send(reply).await?;
             }
             _ => {
-                socket.send(Reply::not_implemented()).await?;
+                let reply = self
+                    .handler
+                    .unhandled_command(command)
+                    .await
+                    .unwrap_or_else(Reply::not_implemented);
+                socket.send(reply).await?;
             }
         }
         Ok(None)
