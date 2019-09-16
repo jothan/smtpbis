@@ -21,12 +21,18 @@ pub type EhloKeywords = BTreeMap<String, Option<String>>;
 pub type ShutdownSignal = dyn FusedFuture<Output = Result<(), ()>> + Send + Unpin;
 
 #[async_trait]
-pub trait Handler {
+pub trait Handler: Send
+where
+    Self::TlsSession: Sync,
+{
     type TlsConfig;
     type TlsSession;
 
-    async fn tls_request(&mut self) -> Option<Self::TlsConfig>;
-    async fn tls_started(&mut self, session: &Self::TlsSession);
+    async fn tls_request(&mut self) -> Option<Self::TlsConfig> {
+        None
+    }
+
+    async fn tls_started(&mut self, _session: &Self::TlsSession) {}
 
     async fn ehlo(
         &mut self,
@@ -39,7 +45,9 @@ pub trait Handler {
     async fn mail(&mut self, path: ReversePath, params: Vec<Param>) -> Option<Reply>;
     async fn rcpt(&mut self, path: ForwardPath, params: Vec<Param>) -> Option<Reply>;
 
-    async fn data_start(&mut self) -> Option<Reply>;
+    async fn data_start(&mut self) -> Option<Reply> {
+        None
+    }
     async fn data<S>(&mut self, stream: &mut S) -> Result<Option<Reply>, ServerError>
     where
         S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send;
