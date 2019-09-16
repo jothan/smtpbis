@@ -10,6 +10,7 @@ use bytes::BytesMut;
 use futures_util::future::{select, Either};
 use futures_util::pin_mut;
 use futures_util::try_future::TryFutureExt;
+use futures_util::try_stream::TryStreamExt;
 use tokio::net::{signal, TcpListener, TcpStream};
 use tokio::prelude::*;
 use tokio::runtime::Runtime;
@@ -112,8 +113,8 @@ impl Handler for DummyHandler {
         let mut nb_lines: usize = 0;
         self.body.clear();
 
-        while let Some(line) = stream.next().await {
-            self.body.extend(line?);
+        while let Some(line) = stream.try_next().await? {
+            self.body.extend(line);
             nb_lines += 1;
         }
 
@@ -133,8 +134,8 @@ impl Handler for DummyHandler {
     where
         S: Stream<Item = Result<BytesMut, LineError>> + Unpin + Send,
     {
-        while let Some(chunk) = stream.next().await {
-            self.body.extend(chunk?)
+        while let Some(chunk) = stream.try_next().await? {
+            self.body.extend(chunk)
         }
         if last {
             self.reset_tx();
