@@ -181,7 +181,6 @@ where
                 }
                 None => {}
             }
-
         }
     }
 
@@ -381,7 +380,12 @@ where
         ServerError: From<<S as Sink<Reply>>::Error>,
     {
         Ok(match self.state {
-            State::RCPT => match self.handler.data_start().await.with_default(Reply::data_ok()) {
+            State::RCPT => match self
+                .handler
+                .data_start()
+                .await
+                .with_default(Reply::data_ok())
+            {
                 Ok(reply) => {
                     socket.send(reply).await?;
 
