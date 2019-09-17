@@ -81,7 +81,6 @@ impl LineCodec {
         bytes_remaining: u64,
     ) -> Result<Option<BytesMut>, LineError> {
         if bytes_remaining == 0 {
-            println!("BACK TO LINE MODE");
             self.state = State::Text { next_index: 0 };
             return Err(LineError::ChunkingDone);
         }

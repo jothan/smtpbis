@@ -161,7 +161,6 @@ where
                 }
                 Err(e) => return Err(e),
             };
-            println!("command: {:?}", cmd);
 
             match self.dispatch_command(&mut socket, cmd).await? {
                 Some(LoopExit::STARTTLS(tls_config)) => {
@@ -183,7 +182,6 @@ where
                 None => {}
             }
 
-            println!("State: {:?}\n", self.state);
         }
     }
 
@@ -200,8 +198,6 @@ where
         S: Sink<Reply>,
         ServerError: From<<S as Sink<Reply>>::Error>,
     {
-        println!("Waiting for command...");
-
         self.shutdown_check()?;
 
         let line = if self.shutdown.is_terminated() {
@@ -266,8 +262,6 @@ where
                 socket.send(Reply::ok()).await?;
             }
             Ext(crate::Ext::STARTTLS) if self.config.enable_starttls => {
-                println!("STARTTLS !");
-
                 if let Some(tls_config) = self.handler.tls_request().await {
                     return Ok(Some(LoopExit::STARTTLS(tls_config)));
                 } else {
