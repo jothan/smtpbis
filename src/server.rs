@@ -394,7 +394,7 @@ where
                         .handler
                         .data(&mut body_stream)
                         .await?
-                        .unwrap_or(Reply::ok());
+                        .unwrap_or_else(Reply::ok);
 
                     if !body_stream.is_done() {
                         drop(body_stream);
@@ -443,7 +443,7 @@ where
                     .await?;
 
                 if !body_stream.is_done() {
-                    let mut reply = reply.unwrap_or(Reply::ok());
+                    let mut reply = reply.unwrap_or_else(Reply::ok);
 
                     drop(body_stream);
                     // The handler MUST signal an error.
