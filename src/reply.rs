@@ -138,7 +138,7 @@ impl Display for Reply {
     }
 }
 
-pub struct EnhancedCode(u8, u16, u16);
+pub struct EnhancedCode(pub u8, pub u16, pub u16);
 
 impl Display for EnhancedCode {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
