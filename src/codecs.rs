@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt::{Display, Write};
 
 use bytes::BytesMut;
-use tokio::codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder, Encoder};
 
 use crate::Reply;
 

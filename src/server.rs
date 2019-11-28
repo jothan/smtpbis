@@ -4,9 +4,13 @@ use std::fmt::Write;
 use async_trait::async_trait;
 use bytes::BytesMut;
 
+use futures::Sink;
 use futures_util::future::{select, Either, FusedFuture};
-use tokio::codec::{Framed, FramedParts};
+use futures_util::sink::SinkExt;
+use futures_util::stream::{Stream, StreamExt};
+
 use tokio::prelude::*;
+use tokio_util::codec::{Framed, FramedParts};
 
 use crate::reply::ReplyDefault;
 use crate::{command, Command, Command::Base, Command::*};
@@ -510,7 +514,7 @@ where
 {
     source
         .take_while(|res| {
-            tokio::future::ready(
+            futures::future::ready(
                 res.as_ref()
                     .map(|line| line.as_ref() != b".\r\n")
                     .unwrap_or(true),
@@ -542,6 +546,6 @@ where
             _ => true,
         };
 
-        tokio::future::ready(more)
+        futures::future::ready(more)
     })
 }

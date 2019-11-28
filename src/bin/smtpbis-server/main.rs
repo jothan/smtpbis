@@ -8,10 +8,12 @@ use async_trait::async_trait;
 use bytes::BytesMut;
 
 use futures_util::future::{select, Either};
+use futures_util::future::{FutureExt, TryFutureExt};
 use futures_util::pin_mut;
-use futures_util::try_future::TryFutureExt;
-use futures_util::try_stream::TryStreamExt;
-use tokio::net::{signal, TcpListener, TcpStream};
+use futures_util::stream::Stream;
+use futures_util::stream::TryStreamExt;
+
+use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot::Receiver;
@@ -159,19 +161,17 @@ impl DummyHandler {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rt = Runtime::new()?;
+    let mut rt = Runtime::new()?;
 
     rt.block_on(async {
         let (listen_shutdown_tx, listen_shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(listen_loop(listen_shutdown_rx));
 
-        let mut ctrl_c = signal::ctrl_c().unwrap();
-        ctrl_c.next().await;
+        tokio::signal::ctrl_c().await.unwrap();
         listen_shutdown_tx.send(()).unwrap();
         println!("Waiting for tasks to finish...");
+        // FIXME: actually wait on tasks here.
     });
-
-    rt.shutdown_on_idle();
 
     Ok(())
 }
