@@ -15,7 +15,6 @@ use futures_util::stream::TryStreamExt;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
-use tokio::runtime::Runtime;
 use tokio::sync::oneshot::Receiver;
 
 use tokio_rustls::rustls::{
@@ -160,18 +159,16 @@ impl DummyHandler {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rt = Runtime::new()?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (listen_shutdown_tx, listen_shutdown_rx) = tokio::sync::oneshot::channel();
+    let join = tokio::spawn(listen_loop(listen_shutdown_rx));
 
-    rt.block_on(async {
-        let (listen_shutdown_tx, listen_shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(listen_loop(listen_shutdown_rx));
-
-        tokio::signal::ctrl_c().await.unwrap();
-        listen_shutdown_tx.send(()).unwrap();
-        println!("Waiting for tasks to finish...");
-        // FIXME: actually wait on tasks here.
-    });
+    tokio::signal::ctrl_c().await.unwrap();
+    listen_shutdown_tx.send(()).unwrap();
+    println!("Waiting for tasks to finish...");
+    join.await?;
+    println!("Done !");
 
     Ok(())
 }
@@ -187,7 +184,7 @@ async fn listen_loop(mut shutdown: Receiver<()>) {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let shutdown_rx = shutdown_rx.map_err(|_| ()).shared();
 
-    loop {
+    smtpbis::taskjoin::join_tasks(move |spawn| Box::pin(async move { loop {
         let accept = listener.accept();
         pin_mut!(accept);
 
@@ -197,10 +194,10 @@ async fn listen_loop(mut shutdown: Receiver<()>) {
                 let mut shutdown_rx = shutdown_rx.clone();
                 let tls_config = tls_config.clone();
 
-                tokio::spawn(async move {
+                spawn.read().unwrap().push(tokio::spawn(async move {
                     let smtp_res = serve_smtp(socket, addr, tls_config, &mut shutdown_rx).await;
                     println!("SMTP task done: {:?}", smtp_res);
-                })
+                }))
             }
             Either::Right(..) => {
                 println!("socket listening loop stopping");
@@ -208,7 +205,7 @@ async fn listen_loop(mut shutdown: Receiver<()>) {
                 break;
             }
         };
-    }
+    }})).await;
 }
 
 async fn serve_smtp(

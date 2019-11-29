@@ -4,6 +4,7 @@ mod codecs;
 mod reply;
 mod server;
 mod syntax;
+pub mod taskjoin;
 
 pub use codecs::{LineCodec, LineError};
 pub use reply::*;

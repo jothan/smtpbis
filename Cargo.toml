@@ -12,7 +12,7 @@ repository = "https://github.com/zerospam/smtpbis.git"
 
 [dependencies]
 rustyknife = {version="0.2", features=["quoted-string-rfc2047"]}
-tokio = {version="0.2", features=["signal", "io-util", "sync", "signal", "rt-core", "tcp", "dns", "rt-threaded"]}
+tokio = {version="0.2", features=["signal", "io-util", "sync", "signal", "rt-core", "tcp", "dns", "rt-threaded", "macros"]}
 tokio-util = {version="0.2", features=["codec"]}
 bytes = "0.5"
 futures = "0.3"
