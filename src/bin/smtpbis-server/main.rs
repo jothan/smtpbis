@@ -31,8 +31,8 @@ use smtpbis::{
     ShutdownSignal,
 };
 
-const CERT: &[u8] = include_bytes!("ssl-cert-snakeoil.pem");
-const KEY: &[u8] = include_bytes!("ssl-cert-snakeoil.key");
+const CERT: &[u8] = include_bytes!("../../../data/testcert.pem");
+const KEY: &[u8] = include_bytes!("../../../data/testcert.key");
 
 struct DummyHandler {
     tls_config: Arc<ServerConfig>,
