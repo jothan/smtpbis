@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use async_trait::async_trait;
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 
 use futures::Sink;
 use futures_util::future::{select, Either, FusedFuture};
@@ -523,7 +523,7 @@ where
         .map(|res| {
             res.map(|mut line| {
                 if line.starts_with(b".") {
-                    line.split_to(1);
+                    line.advance(1);
                 }
                 line
             })
