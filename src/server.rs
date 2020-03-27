@@ -507,7 +507,6 @@ impl From<std::io::Error> for ServerError {
     }
 }
 
-#[must_use]
 fn read_body_data<'a, S>(source: &'a mut S) -> impl Stream<Item = Result<BytesMut, LineError>> + 'a
 where
     S: Stream<Item = Result<BytesMut, LineError>> + Unpin,
@@ -530,7 +529,6 @@ where
         })
 }
 
-#[must_use]
 fn read_body_bdat<'a, S>(
     socket: &'a mut Framed<S, LineCodec>,
     size: u64,
