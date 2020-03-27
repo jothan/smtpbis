@@ -25,6 +25,7 @@ pub enum LineError {
     LineTooLong,
     IO(std::io::Error),
     ChunkingDone,
+    DataAbort,
 }
 
 #[derive(Clone, Debug)]

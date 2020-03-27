@@ -1,9 +1,14 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
 use bytes::{Buf, BytesMut};
 
+use futures::future::ready;
 use futures::Sink;
 use futures_util::future::{select, Either, FusedFuture};
 use futures_util::sink::SinkExt;
@@ -511,11 +516,24 @@ fn read_body_data<'a, S>(source: &'a mut S) -> impl Stream<Item = Result<BytesMu
 where
     S: Stream<Item = Result<BytesMut, LineError>> + Unpin,
 {
+    let gen_abort = Arc::new(AtomicBool::new(true));
+    let gen_abort2 = gen_abort.clone();
+
+    let abort = futures::stream::once(ready(Err(LineError::DataAbort)))
+        .filter(move |_| ready(gen_abort.load(Ordering::SeqCst)));
+
     source
-        .take_while(|res| {
-            futures::future::ready(
+        .take_while(move |res| {
+            ready(
                 res.as_ref()
-                    .map(|line| line.as_ref() != b".\r\n")
+                    .map(|line| {
+                        if line.as_ref() == b".\r\n" {
+                            gen_abort2.store(false, Ordering::SeqCst);
+                            false
+                        } else {
+                            true
+                        }
+                    })
                     .unwrap_or(true),
             )
         })
@@ -527,6 +545,7 @@ where
                 line
             })
         })
+        .chain(abort)
 }
 
 fn read_body_bdat<'a, S>(
@@ -536,14 +555,25 @@ fn read_body_bdat<'a, S>(
 where
     Framed<S, LineCodec>: Stream<Item = Result<BytesMut, LineError>> + Unpin,
 {
+    let gen_abort = Arc::new(AtomicBool::new(true));
+    let gen_abort2 = gen_abort.clone();
+
+    let abort = futures::stream::once(ready(Err(LineError::DataAbort)))
+        .filter(move |_| ready(gen_abort.load(Ordering::SeqCst)));
+
     socket.codec_mut().chunking_mode(size);
 
-    socket.take_while(|chunk| {
-        let more = match chunk {
-            Err(LineError::ChunkingDone) => false,
-            _ => true,
-        };
+    socket
+        .take_while(move |chunk| {
+            let more = match chunk {
+                Err(LineError::ChunkingDone) => {
+                    gen_abort2.store(false, Ordering::SeqCst);
+                    false
+                }
+                _ => true,
+            };
 
-        futures::future::ready(more)
-    })
+            ready(more)
+        })
+        .chain(abort)
 }
