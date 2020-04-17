@@ -131,9 +131,8 @@ impl Decoder for LineCodec {
     }
 }
 
-impl Encoder for LineCodec {
+impl Encoder<Reply> for LineCodec {
     type Error = LineError;
-    type Item = Reply;
 
     fn encode(&mut self, reply: Reply, buf: &mut BytesMut) -> Result<(), Self::Error> {
         write!(buf, "{}", reply)

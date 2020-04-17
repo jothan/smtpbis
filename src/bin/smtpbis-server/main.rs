@@ -19,13 +19,13 @@ use tokio::runtime::Runtime;
 use tokio::sync::oneshot::Receiver;
 
 use tokio_rustls::rustls::{
-    internal::pemfile::{certs, pkcs8_private_keys},
+    internal::pemfile::{certs, rsa_private_keys},
     NoClientAuth, ServerConfig, ServerSession, Session,
 };
 use tokio_rustls::TlsAcceptor;
 
 use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
-use rustyknife::types::{Domain, DomainPart, Mailbox};
+use rustyknife::types::{Domain, DomainPart};
 use smtpbis::{
     smtp_server, Config, EhloKeywords, Handler, LineError, LoopExit, Reply, ServerError,
     ShutdownSignal,
@@ -93,9 +93,11 @@ impl Handler for DummyHandler {
 
     async fn rcpt(&mut self, path: ForwardPath, _params: Vec<Param>) -> Option<Reply> {
         println!("Handler RCPT: {:?}", path);
-        if let ForwardPath::Path(Path(Mailbox(_, DomainPart::Domain(domain)), _)) = &path {
-            if domain.starts_with('z') {
-                return Some(Reply::new(550, None, "I don't like zeds"));
+        if let ForwardPath::Path(Path(mbox, _)) = &path {
+            if let DomainPart::Domain(domain) = mbox.domain_part() {
+                if domain.starts_with('z') {
+                    return Some(Reply::new(550, None, "I don't like zeds"));
+                }
             }
         };
         self.rcpt.push(path);
@@ -181,7 +183,7 @@ async fn listen_loop(mut shutdown: Receiver<()>) {
 
     let mut tls_config = ServerConfig::new(NoClientAuth::new());
     let certs = certs(&mut Cursor::new(CERT)).unwrap();
-    let key = pkcs8_private_keys(&mut Cursor::new(KEY)).unwrap().remove(0);
+    let key = rsa_private_keys(&mut Cursor::new(KEY)).unwrap().remove(0);
     tls_config.set_single_cert(certs, key).unwrap();
     let tls_config = Arc::new(tls_config);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
