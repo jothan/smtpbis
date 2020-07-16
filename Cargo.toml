@@ -17,6 +17,6 @@ tokio-util = {version="0.3", features=["codec"]}
 bytes = "0.5"
 futures = "0.3"
 futures-util = "0.3"
-tokio-rustls = "0.13"
+tokio-rustls = "0.14"
 nom = "5.1"
 async-trait = "0.1.10"
