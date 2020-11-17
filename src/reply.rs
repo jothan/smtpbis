@@ -63,10 +63,10 @@ impl Reply {
     }
 
     pub fn is_error(&self) -> bool {
-        match ReplyCategory::from(self) {
-            ReplyCategory::TempError | ReplyCategory::PermError => true,
-            _ => false,
-        }
+        matches!(
+            ReplyCategory::from(self),
+            ReplyCategory::TempError | ReplyCategory::PermError
+        )
     }
 }
 
