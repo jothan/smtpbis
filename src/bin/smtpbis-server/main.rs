@@ -163,7 +163,7 @@ impl DummyHandler {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rt = Runtime::new()?;
+    let rt = Runtime::new()?;
 
     rt.block_on(async {
         let (listen_shutdown_tx, listen_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -179,7 +179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn listen_loop(mut shutdown: Receiver<()>) {
-    let mut listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
     let mut tls_config = ServerConfig::new(NoClientAuth::new());
     let certs = certs(&mut Cursor::new(CERT)).unwrap();
