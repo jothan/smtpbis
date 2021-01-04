@@ -1,5 +1,5 @@
-use nom::branch::alt;
-use nom::combinator::map;
+use rustyknife::nom::branch::alt;
+use rustyknife::nom::combinator::map;
 
 use rustyknife::rfc5321::{
     bdat_command, command as base_command, starttls_command, Command as BaseCommand, UTF8Policy,

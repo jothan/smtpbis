@@ -13,8 +13,8 @@ use futures_util::pin_mut;
 use futures_util::stream::Stream;
 use futures_util::stream::TryStreamExt;
 
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::prelude::*;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot::Receiver;
 

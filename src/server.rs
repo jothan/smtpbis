@@ -14,7 +14,7 @@ use futures_util::future::{select, Either, FusedFuture};
 use futures_util::sink::SinkExt;
 use futures_util::stream::{Stream, StreamExt};
 
-use tokio::prelude::*;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::codec::{Framed, FramedParts};
 
 use crate::reply::ReplyDefault;
