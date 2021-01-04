@@ -512,7 +512,7 @@ impl From<std::io::Error> for ServerError {
     }
 }
 
-fn read_body_data<'a, S>(source: &'a mut S) -> impl Stream<Item = Result<BytesMut, LineError>> + 'a
+fn read_body_data<S>(source: &mut S) -> impl Stream<Item = Result<BytesMut, LineError>> + '_
 where
     S: Stream<Item = Result<BytesMut, LineError>> + Unpin,
 {
@@ -548,10 +548,10 @@ where
         .chain(abort)
 }
 
-fn read_body_bdat<'a, S>(
-    socket: &'a mut Framed<S, LineCodec>,
+fn read_body_bdat<S>(
+    socket: &mut Framed<S, LineCodec>,
     size: u64,
-) -> impl Stream<Item = Result<BytesMut, LineError>> + 'a
+) -> impl Stream<Item = Result<BytesMut, LineError>> + '_
 where
     Framed<S, LineCodec>: Stream<Item = Result<BytesMut, LineError>> + Unpin,
 {

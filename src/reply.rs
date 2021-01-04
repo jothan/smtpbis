@@ -14,7 +14,7 @@ impl Reply {
         text: S,
     ) -> Option<Self> {
         let text = text.into();
-        if code < 200 || code >= 600 || text.contains('\r') {
+        if !(200..600).contains(&code) || text.contains('\r') {
             return None;
         }
         Some(Reply { code, ecode, text })
