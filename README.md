@@ -17,3 +17,9 @@ Features:
 
 [rustyknife]: https://crates.io/crates/rustyknife
 [tokio]: https://tokio.rs/
+
+## Usage
+
+```
+cargo run --example smtpbis-server
+```
