@@ -112,7 +112,7 @@ where
 
     let res = server.serve(socket, banner).await;
     socket.flush().await?;
-    Ok(res?)
+    res
 }
 
 pub enum LoopExit<H: Handler> {
