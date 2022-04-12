@@ -68,6 +68,7 @@ impl Handler for DummyHandler {
         initial_keywords.insert("DSN".into(), None);
         initial_keywords.insert("8BITMIME".into(), None);
         initial_keywords.insert("SIZE".into(), Some("73400320".into()));
+        initial_keywords.insert("AUTH".into(), Some("PLAIN".into()));
 
         let greet = format!("hello {} from {}", domain, self.addr);
         self.helo = Some(domain);
@@ -81,6 +82,24 @@ impl Handler for DummyHandler {
         self.reset_tx();
 
         None
+    }
+
+    async fn auth(&mut self, auth_msg: String) -> Option<Reply> {
+        if let Ok(auth_msg) = base64::decode(auth_msg) {
+            let auth_raw = String::from_utf8_lossy(&auth_msg);
+            let auth_parts: Vec<&str> = auth_raw.split('\0').collect();
+            println!("authorization_identity: {:?}", auth_parts[0]);
+            println!("authentication_identity: {:?}", auth_parts[1]);
+            println!("password: {:?}", auth_parts[2]);
+
+            if true {
+                Some(Reply::new(235, None, "Authentication successful"))
+            } else {
+                Some(Reply::new(535, None, "Authentication credentials invalid"))
+            }
+        } else {
+            Some(Reply::new(501, None, "Base64-decode failed"))
+        }
     }
 
     async fn mail(&mut self, path: ReversePath, _params: Vec<Param>) -> Option<Reply> {

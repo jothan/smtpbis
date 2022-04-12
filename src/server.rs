@@ -50,7 +50,7 @@ where
     ) -> Result<(String, EhloKeywords), Reply>;
     async fn helo(&mut self, domain: Domain) -> Option<Reply>;
     async fn rset(&mut self);
-
+    async fn auth(&mut self, plain_msg: String) -> Option<Reply>;
     async fn mail(&mut self, path: ReversePath, params: Vec<Param>) -> Option<Reply>;
     async fn rcpt(&mut self, path: ForwardPath, params: Vec<Param>) -> Option<Reply>;
 
@@ -78,6 +78,7 @@ pub struct Config {
     pub enable_smtputf8: bool,
     pub enable_chunking: bool,
     pub enable_starttls: bool,
+    pub enable_auth: bool,
 }
 
 impl Default for Config {
@@ -86,6 +87,7 @@ impl Default for Config {
             enable_smtputf8: true,
             enable_chunking: true,
             enable_starttls: true,
+            enable_auth: true,
         }
     }
 }
@@ -123,6 +125,7 @@ pub enum LoopExit<H: Handler> {
 #[derive(Debug, PartialEq)]
 enum State {
     Initial,
+    AUTH,
     MAIL,
     RCPT,
     BDAT,
@@ -280,6 +283,9 @@ where
                 let reply = self.do_bdat(socket, size, last).await?;
                 socket.send(reply).await?;
             }
+            Ext(crate::Ext::AUTH(mechanism)) if self.config.enable_auth => {
+                socket.send(self.do_auth(mechanism).await?).await?;
+            }
             _ => {
                 let reply = self
                     .handler
@@ -306,6 +312,9 @@ where
         }
         if self.config.enable_starttls {
             initial_keywords.insert("STARTTLS".into(), None);
+        }
+        if self.config.enable_auth {
+            initial_keywords.insert("AUTH".into(), Some("PLAIN".to_string()));
         }
 
         match self.handler.ehlo(domain, initial_keywords).await {
@@ -338,13 +347,26 @@ where
         )
     }
 
+    async fn do_auth(&mut self, mechanism: String) -> Result<Reply, ServerError> {
+        Ok(match self.state {
+            State::Initial => match self.handler.auth(mechanism).await.with_default(Reply::ok()) {
+                Ok(reply) => {
+                    self.state = State::AUTH;
+                    reply
+                }
+                Err(reply) => reply,
+            },
+            _ => Reply::bad_sequence(),
+        })
+    }
+
     async fn do_mail(
         &mut self,
         path: ReversePath,
         params: Vec<Param>,
     ) -> Result<Reply, ServerError> {
         Ok(match self.state {
-            State::Initial => match self
+            State::AUTH => match self
                 .handler
                 .mail(path, params)
                 .await
@@ -366,7 +388,7 @@ where
         params: Vec<Param>,
     ) -> Result<Reply, ServerError> {
         Ok(match self.state {
-            State::MAIL | State::RCPT => match self
+            State::MAIL | State::RCPT | State::AUTH => match self
                 .handler
                 .rcpt(path, params)
                 .await
@@ -422,7 +444,7 @@ where
                 }
                 Err(reply) => reply,
             },
-            State::Initial => Reply::no_mail_transaction(),
+            State::Initial | State::AUTH => Reply::no_mail_transaction(),
             State::MAIL => Reply::no_valid_recipients(),
             State::BDAT | State::BDATFAIL => {
                 Reply::new(503, None, "BDAT may not be mixed with DATA")

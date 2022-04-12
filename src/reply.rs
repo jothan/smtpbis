@@ -36,6 +36,10 @@ impl Reply {
         Self::new(503, None, "Bad sequence of commands")
     }
 
+    pub fn auth_required() -> Self {
+        Self::new(530, None, "Authentication required")
+    }
+
     pub fn no_mail_transaction() -> Self {
         Self::new(503, None, "No mail transaction in progress")
     }
