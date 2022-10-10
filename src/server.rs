@@ -365,21 +365,39 @@ where
         path: ReversePath,
         params: Vec<Param>,
     ) -> Result<Reply, ServerError> {
-        Ok(match self.state {
-            State::AUTH => match self
-                .handler
-                .mail(path, params)
-                .await
-                .with_default(Reply::ok())
-            {
-                Ok(reply) => {
-                    self.state = State::MAIL;
-                    reply
-                }
-                Err(reply) => reply,
-            },
-            _ => Reply::bad_sequence(),
-        })
+        if self.config.enable_auth {
+            Ok(match self.state {
+                State::AUTH => match self
+                    .handler
+                    .mail(path, params)
+                    .await
+                    .with_default(Reply::ok())
+                {
+                    Ok(reply) => {
+                        self.state = State::MAIL;
+                        reply
+                    }
+                    Err(reply) => reply,
+                },
+                _ => Reply::bad_sequence(),
+            })
+        } else {
+            Ok(match self.state {
+                State::Initial => match self
+                    .handler
+                    .mail(path, params)
+                    .await
+                    .with_default(Reply::ok())
+                {
+                    Ok(reply) => {
+                        self.state = State::MAIL;
+                        reply
+                    }
+                    Err(reply) => reply,
+                },
+                _ => Reply::bad_sequence(),
+            })
+        }
     }
 
     async fn do_rcpt(
