@@ -18,10 +18,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot::Receiver;
 
-use tokio_rustls::rustls::{
-    internal::pemfile::{certs, rsa_private_keys},
-    NoClientAuth, ServerConfig, ServerSession, Session,
-};
+use rustls_pemfile::{certs, rsa_private_keys};
+use tokio_rustls::rustls::{Certificate, PrivateKey};
+use tokio_rustls::rustls::{ServerConfig, ServerConnection};
 use tokio_rustls::TlsAcceptor;
 
 use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
@@ -31,8 +30,8 @@ use smtpbis::{
     ShutdownSignal,
 };
 
-const CERT: &[u8] = include_bytes!("../../../data/testcert.pem");
-const KEY: &[u8] = include_bytes!("../../../data/testcert.key");
+const CERT: &[u8] = include_bytes!("../data/testcert.pem");
+const KEY: &[u8] = include_bytes!("../data/testcert.key");
 
 struct DummyHandler {
     tls_config: Arc<ServerConfig>,
@@ -46,7 +45,7 @@ struct DummyHandler {
 #[async_trait]
 impl Handler for DummyHandler {
     type TlsConfig = Arc<ServerConfig>;
-    type TlsSession = ServerSession;
+    type TlsSession = ServerConnection;
 
     async fn tls_request(&mut self) -> Option<Self::TlsConfig> {
         Some(self.tls_config.clone())
@@ -55,8 +54,8 @@ impl Handler for DummyHandler {
     async fn tls_started(&mut self, session: &Self::TlsSession) {
         println!(
             "TLS started: {:?}/{:?}",
-            session.get_protocol_version(),
-            session.get_negotiated_ciphersuite()
+            session.protocol_version(),
+            session.negotiated_cipher_suite()
         );
         self.reset_tx();
     }
@@ -69,6 +68,7 @@ impl Handler for DummyHandler {
         initial_keywords.insert("DSN".into(), None);
         initial_keywords.insert("8BITMIME".into(), None);
         initial_keywords.insert("SIZE".into(), Some("73400320".into()));
+        initial_keywords.insert("AUTH".into(), Some("PLAIN".into()));
 
         let greet = format!("hello {} from {}", domain, self.addr);
         self.helo = Some(domain);
@@ -82,6 +82,24 @@ impl Handler for DummyHandler {
         self.reset_tx();
 
         None
+    }
+
+    async fn auth(&mut self, auth_msg: String) -> Option<Reply> {
+        if let Ok(auth_msg) = base64::decode(auth_msg) {
+            let auth_raw = String::from_utf8_lossy(&auth_msg);
+            let auth_parts: Vec<&str> = auth_raw.split('\0').collect();
+            println!("authorization_identity: {:?}", auth_parts[0]);
+            println!("authentication_identity: {:?}", auth_parts[1]);
+            println!("password: {:?}", auth_parts[2]);
+
+            if true {
+                Some(Reply::new(235, None, "Authentication successful"))
+            } else {
+                Some(Reply::new(535, None, "Authentication credentials invalid"))
+            }
+        } else {
+            Some(Reply::new(501, None, "Base64-decode failed"))
+        }
     }
 
     async fn mail(&mut self, path: ReversePath, _params: Vec<Param>) -> Option<Reply> {
@@ -181,10 +199,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn listen_loop(mut shutdown: Receiver<()>) {
     let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
-    let mut tls_config = ServerConfig::new(NoClientAuth::new());
     let certs = certs(&mut Cursor::new(CERT)).unwrap();
+    let certificates: Vec<Certificate> = certs.into_iter().map(Certificate).collect();
     let key = rsa_private_keys(&mut Cursor::new(KEY)).unwrap().remove(0);
-    tls_config.set_single_cert(certs, key).unwrap();
+
+    let tls_config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(certificates, PrivateKey(key))
+        .expect("bad certificate/key");
+
+    // tls_config.set_single_cert(certs, key).unwrap();
     let tls_config = Arc::new(tls_config);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let shutdown_rx = shutdown_rx.map_err(|_| ()).shared();
