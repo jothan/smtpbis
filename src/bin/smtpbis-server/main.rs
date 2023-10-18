@@ -19,7 +19,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::oneshot::Receiver;
 
 use rustls_pemfile::rsa_private_keys;
-use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
+use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig, ServerConnection};
 use tokio_rustls::TlsAcceptor;
 
 use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
@@ -39,6 +39,16 @@ struct DummyHandler {
     mail: Option<ReversePath>,
     rcpt: Vec<ForwardPath>,
     body: Vec<u8>,
+}
+
+impl DummyHandler {
+    async fn tls_started(&self, conn: &ServerConnection) {
+        println!(
+            "TLS started: {:?}/{:?}",
+            conn.protocol_version().unwrap(),
+            conn.negotiated_cipher_suite().unwrap(),
+        );
+    }
 }
 
 #[async_trait]
@@ -239,6 +249,7 @@ async fn serve_smtp(
             let acceptor = TlsAcceptor::from(tls_config);
             let mut tls_socket = acceptor.accept(socket).await?;
             config.enable_starttls = false;
+            handler.tls_started(tls_socket.get_ref().1).await;
             match smtp_server(&mut tls_socket, &mut handler, &config, shutdown, false).await {
                 Ok(_) => println!("TLS Server done"),
                 Err(e) => println!("TLS Top level error: {:?}", e),
