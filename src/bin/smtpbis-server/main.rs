@@ -18,10 +18,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot::Receiver;
 
-use tokio_rustls::rustls::{
-    internal::pemfile::{certs, rsa_private_keys},
-    NoClientAuth, ServerConfig, ServerSession, Session,
-};
+use rustls_pemfile::rsa_private_keys;
+use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig, ServerConnection};
 use tokio_rustls::TlsAcceptor;
 
 use rustyknife::rfc5321::{ForwardPath, Param, Path, ReversePath};
@@ -43,22 +41,22 @@ struct DummyHandler {
     body: Vec<u8>,
 }
 
+impl DummyHandler {
+    async fn tls_started(&self, conn: &ServerConnection) {
+        println!(
+            "TLS started: {:?}/{:?}",
+            conn.protocol_version().unwrap(),
+            conn.negotiated_cipher_suite().unwrap(),
+        );
+    }
+}
+
 #[async_trait]
 impl Handler for DummyHandler {
     type TlsConfig = Arc<ServerConfig>;
-    type TlsSession = ServerSession;
 
     async fn tls_request(&mut self) -> Option<Self::TlsConfig> {
         Some(self.tls_config.clone())
-    }
-
-    async fn tls_started(&mut self, session: &Self::TlsSession) {
-        println!(
-            "TLS started: {:?}/{:?}",
-            session.get_protocol_version(),
-            session.get_negotiated_ciphersuite()
-        );
-        self.reset_tx();
     }
 
     async fn ehlo(
@@ -179,13 +177,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn listen_loop(mut shutdown: Receiver<()>) {
-    let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:2525").await.unwrap();
 
-    let mut tls_config = ServerConfig::new(NoClientAuth::new());
-    let certs = certs(&mut Cursor::new(CERT)).unwrap();
-    let key = rsa_private_keys(&mut Cursor::new(KEY)).unwrap().remove(0);
-    tls_config.set_single_cert(certs, key).unwrap();
+    let certs = rustls_pemfile::certs(&mut Cursor::new(CERT))
+        .unwrap()
+        .into_iter()
+        .map(Certificate)
+        .collect();
+    let key = PrivateKey(
+        rsa_private_keys(&mut Cursor::new(KEY))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap(),
+    );
+
+    let tls_config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+
     let tls_config = Arc::new(tls_config);
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let shutdown_rx = shutdown_rx.map_err(|_| ()).shared();
 

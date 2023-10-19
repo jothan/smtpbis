@@ -30,18 +30,12 @@ pub type EhloKeywords = BTreeMap<String, Option<String>>;
 pub type ShutdownSignal = dyn FusedFuture<Output = Result<(), ()>> + Send + Unpin;
 
 #[async_trait]
-pub trait Handler: Send
-where
-    Self::TlsSession: Sync,
-{
+pub trait Handler: Send {
     type TlsConfig;
-    type TlsSession;
 
     async fn tls_request(&mut self) -> Option<Self::TlsConfig> {
         None
     }
-
-    async fn tls_started(&mut self, _session: &Self::TlsSession) {}
 
     async fn ehlo(
         &mut self,
